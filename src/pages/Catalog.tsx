@@ -2,7 +2,7 @@ import { useMemo, useState } from 'react';
 import { engine } from '../lib/store';
 import { Page, Card, Btn, Modal, Field, inputCls, money, toast, Table, Badge, Empty, run, Confirm, fmtDate } from '../components/ui';
 import { toPaisa, todayStr, addDays, daysBetween } from '../core/money';
-import type { Batch, Medicine, SessionUser } from '../core/types';
+import type { Batch, Medicine, MedicineBarcode, PackagingLevel, SessionUser } from '../core/types';
 import { can } from '../core/types';
 
 const FORMS = ['Tablet', 'Capsule', 'Syrup', 'Injection', 'Cream/Ointment', 'Drops', 'Inhaler', 'Sachet', 'Other'];
@@ -88,7 +88,7 @@ export function Medicines({ user }: { user: SessionUser }) {
   const canEdit = can(user.role, 'medicines.edit');
   const rows = db.medicines.filter(m => {
     const s = q.trim().toLowerCase();
-    if (s && !(m.name.toLowerCase().includes(s) || m.genericName.toLowerCase().includes(s) || m.brandName.toLowerCase().includes(s) || m.barcode === s)) return false;
+    if (s && !(m.name.toLowerCase().includes(s) || m.genericName.toLowerCase().includes(s) || m.brandName.toLowerCase().includes(s) || m.barcode === s || db.medicineBarcodes.some(b => b.medicineId === m.id && b.barcode.toLowerCase() === s))) return false;
     if (catId && String(m.categoryId ?? '') !== catId) return false;
     if (status === 'active' && !m.active) return false;
     if (status === 'inactive' && m.active) return false;
@@ -109,7 +109,7 @@ export function Medicines({ user }: { user: SessionUser }) {
               const st = engine.saleableStock(m.id);
               return <tr key={m.id}>
                 <td><b>{m.name} {m.strength}</b><span className="block text-xs text-slate-400">{m.genericName} · {m.dosageForm} · {m.packSize}{m.prescription !== 'OTC' ? ` · ${m.prescription}` : ''}</span></td>
-                <td className="font-mono text-xs">{m.barcode || '—'}</td>
+                <td className="font-mono text-xs">{m.barcode || '—'}{(() => { const n = engine.barcodesFor(m.id).filter(b => b.active).length; return n > 1 ? <span className="block text-teal-600 font-sans font-semibold">+{n - 1} packaging barcode{n > 2 ? 's' : ''}</span> : null; })()}</td>
                 <td>{db.categories.find(c => c.id === m.categoryId)?.name ?? '—'}</td>
                 <td>{st <= m.minStock ? <Badge color="amber">{st} (low)</Badge> : <Badge color="green">{st}</Badge>}</td>
                 <td className="font-semibold">{money(m.retailPricePaisa)}</td>
@@ -128,14 +128,55 @@ export function Medicines({ user }: { user: SessionUser }) {
       {stockFor && <OpeningBatchForm user={user} med={stockFor} close={() => setStockFor(null)} />}
       {detail && (
         <Modal title={`${detail.name} ${detail.strength}`} onClose={() => setDetail(null)} wide>
-          <MedicineDetail med={detail} />
+          <MedicineDetail med={detail} user={user} />
         </Modal>
       )}
     </Page>
   );
 }
 
-function MedicineDetail({ med }: { med: Medicine }) {
+function BarcodeManager({ med, user }: { med: Medicine; user: SessionUser }) {
+  const canEdit = can(user.role, 'medicines.edit');
+  const records = engine.barcodesFor(med.id);
+  const [f, setF] = useState({ barcode: '', level: 'box' as PackagingLevel, units: '10', sellRs: '', costRs: '' });
+  const set = (k: string, v: any) => setF(x => ({ ...x, [k]: v }));
+  const [delId, setDelId] = useState<number | null>(null);
+  const levelLabel = (r: MedicineBarcode) => r.unitsPerPackage > 1 ? `${r.packagingLevel} = ${r.unitsPerPackage} ${med.unit}` : `${r.packagingLevel} (1 ${med.unit})`;
+  return (
+    <div>
+      <div className="font-semibold mb-1">🏷 Barcodes &amp; packaging</div>
+      <p className="text-xs text-slate-400 mb-2">One medicine can be scanned at several packaging levels. Stock is always counted in <b>{med.unit}</b>; scanning a package consumes its base units (e.g. box of 10 strips → 10). Package price/cost of 0 inherits the normal per-{med.unit} price; a set package price must divide exactly by the units so paisa stay exact.</p>
+      {records.length === 0 ? <Empty text="No barcodes registered yet." /> : (
+        <Table head={['Barcode', 'Packaging', 'Price / package', 'Cost / package', 'Status', '']}>
+          {records.map(r => <tr key={r.id} className={r.active ? '' : 'opacity-50'}>
+            <td className="font-mono text-xs">{r.barcode} {r.isPrimary && <Badge color="blue">primary</Badge>}</td>
+            <td>{levelLabel(r)}</td>
+            <td>{r.sellPricePaisa > 0 ? `${money(r.sellPricePaisa)} (${money(r.sellPricePaisa / r.unitsPerPackage)}/${med.unit})` : 'inherit'}</td>
+            <td>{r.purchaseCostPaisa > 0 ? money(r.purchaseCostPaisa) : 'inherit'}</td>
+            <td>{r.active ? <Badge color="green">Active</Badge> : <Badge>Off</Badge>}</td>
+            <td>{canEdit && <div className="flex gap-1.5 whitespace-nowrap">
+              <Btn kind="ghost" onClick={() => run(() => engine.updateMedicineBarcode(user, r.id, { active: !r.active }), r.active ? 'Barcode deactivated.' : 'Barcode activated.')}>{r.active ? 'Turn off' : 'Turn on'}</Btn>
+              <Btn kind="ghost" onClick={() => setDelId(r.id)}>Delete</Btn></div>}</td>
+          </tr>)}
+        </Table>
+      )}
+      {canEdit && (
+        <div className="grid grid-cols-2 md:grid-cols-5 gap-2 mt-3 items-end">
+          <Field label="New barcode (scan it)"><input className={inputCls} value={f.barcode} onChange={e => set('barcode', e.target.value)} placeholder="Scan or type" /></Field>
+          <Field label="Packaging level"><select className={inputCls} value={f.level} onChange={e => set('level', e.target.value)}>
+            <option value="box">Box</option><option value="bottle">Bottle</option><option value="strip">Strip</option><option value="unit">Individual unit</option></select></Field>
+          <Field label={`Base units (${med.unit}) / package`}><input type="number" min={1} className={inputCls} value={f.units} onChange={e => set('units', e.target.value)} /></Field>
+          <Field label="Sell price/pkg Rs (0=inherit)"><input type="number" min={0} className={inputCls} value={f.sellRs} onChange={e => set('sellRs', e.target.value)} /></Field>
+          <div className="flex gap-1.5"><Field label="Cost/pkg Rs (0=inherit)"><input type="number" min={0} className={inputCls} value={f.costRs} onChange={e => set('costRs', e.target.value)} /></Field>
+            <Btn onClick={() => { if (run(() => engine.addMedicineBarcode(user, { medicineId: med.id, barcode: f.barcode, packagingLevel: f.level, unitsPerPackage: parseInt(f.units) || 1, sellPricePaisa: toPaisa(f.sellRs || 0), purchaseCostPaisa: toPaisa(f.costRs || 0) }), 'Barcode added.')) setF({ barcode: '', level: 'box', units: '10', sellRs: '', costRs: '' }); }}>Add</Btn></div>
+        </div>
+      )}
+      {delId !== null && <Confirm text="Delete this barcode record? Scanning it will then report 'unknown barcode'. Past invoices are unaffected." onNo={() => setDelId(null)} onYes={() => { run(() => engine.deleteMedicineBarcode(user, delId), 'Barcode deleted.'); setDelId(null); }} />}
+    </div>
+  );
+}
+
+function MedicineDetail({ med, user }: { med: Medicine; user: SessionUser }) {
   const db = engine.db;
   const batches = db.batches.filter(b => b.medicineId === med.id).sort((a, b) => a.expiryDate.localeCompare(b.expiryDate));
   const sold = db.saleItems.filter(i => i.medicineId === med.id).reduce((s, i) => s + i.qty, 0);
@@ -155,6 +196,7 @@ function MedicineDetail({ med }: { med: Medicine }) {
           </Table>
         )}
       </div>
+      <BarcodeManager med={med} user={user} />
       <div>
         <div className="font-semibold mb-1">Recent stock movements</div>
         {moves.length === 0 ? <Empty text="No movements." /> : (

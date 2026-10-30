@@ -1,8 +1,11 @@
 import { useRef, useState } from 'react';
 import { engine } from '../lib/store';
+import { defaultScannerSettings, type ScanResolution } from '../core/engine';
+import { parseScan } from '../core/scanner';
+import { beepSuccess, beepError } from '../lib/beep';
 import { Page, Card, Btn, Modal, Field, inputCls, Table, Badge, Empty, run, toast, fmtDateTime, downloadFile, toCSV, Confirm } from '../components/ui';
 import { todayStr } from '../core/money';
-import type { Role, SessionUser, Settings } from '../core/types';
+import type { Role, SessionUser, Settings, ScannerSettings } from '../core/types';
 import { PERMISSIONS } from '../core/types';
 
 export function Users({ user }: { user: SessionUser }) {
@@ -122,9 +125,50 @@ export function Backup({ user }: { user: SessionUser }) {
   );
 }
 
+/** Live scanner test: shows exactly how the app interprets a scan. */
+function ScannerTest() {
+  const [value, setValue] = useState('');
+  const [result, setResult] = useState<ScanResolution | null>(null);
+  const SAMPLE = '(01)08964001234500(17)271231(10)PN-2401(21)SN001';
+  const test = (raw: string) => {
+    if (!raw.trim()) return;
+    const r = engine.resolveScan(raw);
+    setResult(r);
+    if (engine.db.settings.scanner.beepOnSuccess && r.status === 'found') beepSuccess();
+    if (engine.db.settings.scanner.beepOnError && r.status !== 'found') beepError();
+    setValue('');
+  };
+  const p = result?.parsed;
+  return (
+    <div className="border-t border-dashed border-slate-200 dark:border-slate-600 pt-3">
+      <Field label="🧪 Test scanner input — click here and scan any medicine">
+        <input className={inputCls} value={value} onChange={e => setValue(e.target.value)}
+          onKeyDown={e => { if (e.key === 'Enter' || e.key === 'Tab') { e.preventDefault(); test(value); } }}
+          placeholder="Scan a barcode, QR or GS1 DataMatrix…" />
+      </Field>
+      {result && p && (
+        <div className={`mt-2 rounded-lg px-3 py-2 text-xs space-y-1 ${result.status === 'found' ? 'bg-teal-50 dark:bg-teal-900/30 text-teal-900 dark:text-teal-100' : 'bg-red-50 dark:bg-red-900/30 text-red-900 dark:text-red-100'}`}>
+          <div><b>Result:</b> {result.status.toUpperCase()} — {result.message}</div>
+          <div><b>Format:</b> {p.format} · <b>Lookup code:</b> <span className="font-mono">{p.code || '—'}</span> · <b>Check digit:</b> {p.checkDigitValid === null ? 'n/a' : p.checkDigitValid ? 'valid ✓' : 'INVALID ⚠'}</div>
+          {p.gs1 && <div><b>GS1:</b> GTIN {p.gs1.gtin ?? '—'} · Batch {p.gs1.batchNo ?? '—'} · Expiry {p.gs1.expiryDate ?? '—'} · Serial {p.gs1.serial ?? '—'}</div>}
+          {result.status === 'found' && <div><b>Would add:</b> {result.baseQtyPerScan} base unit(s) · <b>Packaging:</b> {result.packagingLabel} · <b>Batch:</b> {result.matchedBatch ? `${result.matchedBatch.batchNo} (exp ${result.matchedBatch.expiryDate})` : 'FEFO fallback'}</div>}
+          {result.warnings.map((w, i) => <div key={i}>⚠ {w}</div>)}
+        </div>
+      )}
+      <div className="flex gap-3 mt-1.5">
+        <button className="text-xs text-teal-600 font-semibold" onClick={() => test(SAMPLE)}>Run sample GS1 test</button>
+        <span className="text-[11px] text-slate-400 font-mono self-center">{SAMPLE}</span>
+        <button className="text-xs text-slate-400" onClick={() => { const parsed = parseScan(SAMPLE); toast(`Parsed kind=${parsed.kind}, GTIN=${parsed.gs1?.gtin}`); }}>Parser only</button>
+      </div>
+    </div>
+  );
+}
+
 export function SettingsPage({ user, dark, setDark }: { user: SessionUser; dark: boolean; setDark: (v: boolean) => void }) {
   const s = engine.db.settings;
-  const [f, setF] = useState<Settings>({ ...s });
+  const [f, setF] = useState<Settings>({ ...s, scanner: { ...defaultScannerSettings(), ...s.scanner } });
+  const [sc, setSc] = useState<ScannerSettings>({ ...defaultScannerSettings(), ...s.scanner });
+  const setScKey = (k: keyof ScannerSettings, v: any) => setSc(x => ({ ...x, [k]: v }));
   const [pw, setPw] = useState({ old: '', next: '' });
   const [confirmClear, setConfirmClear] = useState(false);
   const set = (k: keyof Settings, v: any) => setF(x => ({ ...x, [k]: v }));
@@ -154,7 +198,43 @@ export function SettingsPage({ user, dark, setDark }: { user: SessionUser; dark:
             <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={f.allowCashierReturns} onChange={e => set('allowCashierReturns', e.target.checked)} /> Cashiers may process returns</label>
             <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={f.allowCashierCredit} onChange={e => set('allowCashierCredit', e.target.checked)} /> Cashiers may make credit sales</label>
           </div>
-          <Btn className="mt-4" onClick={() => run(() => engine.updateSettings(user, f), 'Settings saved.')}>Save settings</Btn>
+          <Btn className="mt-4" onClick={() => run(() => engine.updateSettings(user, { ...f, scanner: sc }), 'Settings saved.')}>Save settings</Btn>
+        </Card>
+        <Card title="🔫 Barcode & Scanner">
+          <div className="space-y-3 text-sm">
+            <label className="flex items-center gap-2 font-semibold"><input type="checkbox" checked={sc.enabled} onChange={e => setScKey('enabled', e.target.checked)} /> Scanner enabled</label>
+            <div className="grid grid-cols-2 gap-3">
+              <Field label="Scanner input mode"><select className={inputCls} value={sc.inputMode} onChange={e => setScKey('inputMode', e.target.value)}>
+                <option value="dedicated">Dedicated POS barcode box only</option>
+                <option value="wedge-anywhere">Keyboard-wedge anywhere on POS</option>
+                <option value="both">Both (recommended)</option></select></Field>
+              <Field label="Scan suffix sent by scanner"><select className={inputCls} value={sc.suffix} onChange={e => setScKey('suffix', e.target.value)}>
+                <option value="enter">Enter</option><option value="tab">Tab</option><option value="both">Enter or Tab</option></select></Field>
+              <Field label="Default quantity per scan (packages)"><input type="number" min={1} className={inputCls} value={sc.defaultScanQty} onChange={e => setScKey('defaultScanQty', Math.max(1, parseInt(e.target.value) || 1))} /></Field>
+              <Field label="Unknown barcode behaviour"><select className={inputCls} value={sc.unknownBehavior} onChange={e => setScKey('unknownBehavior', e.target.value)}>
+                <option value="prompt">Warn + offer registration</option><option value="warn-only">Warn only</option></select></Field>
+              <Field label="Duplicate-scan guard window (ms)"><input type="number" min={0} max={3000} step={50} className={inputCls} value={sc.rapidDuplicateWindowMs} onChange={e => setScKey('rapidDuplicateWindowMs', Math.max(0, parseInt(e.target.value) || 0))} /></Field>
+              <div className="space-y-1.5 pt-1">
+                <label className="flex items-center gap-2"><input type="checkbox" checked={sc.autoDetectWedge} onChange={e => setScKey('autoDetectWedge', e.target.checked)} /> Automatic scanner detection (fast typing bursts)</label>
+                <label className="flex items-center gap-2"><input type="checkbox" checked={sc.beepOnSuccess} onChange={e => setScKey('beepOnSuccess', e.target.checked)} /> Beep on successful scan</label>
+                <label className="flex items-center gap-2"><input type="checkbox" checked={sc.beepOnError} onChange={e => setScKey('beepOnError', e.target.checked)} /> Buzz on unknown / blocked scan</label>
+                <label className="flex items-center gap-2"><input type="checkbox" checked={sc.cameraEnabled} onChange={e => setScKey('cameraEnabled', e.target.checked)} /> Allow camera scanning (📷 in POS, if device supports it)</label>
+              </div>
+            </div>
+            <p className="text-xs text-slate-400">The guard window treats identical codes arriving within that time as ONE physical scan (some scanners or key handlers double-fire). Deliberate repeat scans after the window increase quantity normally. Settings are stored in the application database (SQLite in the Windows build) and included in backups.</p>
+            <Btn onClick={() => run(() => engine.updateSettings(user, { scanner: sc }), 'Scanner settings saved.')}>Save scanner settings</Btn>
+            <ScannerTest />
+          </div>
+        </Card>
+        <Card title="🏷 Barcode registry (all medicines)">
+          <p className="text-xs text-slate-400 mb-2">Every registered barcode. To add/edit packaging levels, open the medicine under <b>Medicines → View → Barcodes &amp; packaging</b>. New barcodes can also be registered from POS when an unknown code is scanned.</p>
+          {engine.db.medicineBarcodes.length === 0 ? <Empty text="No barcodes registered yet." /> : (
+            <Table head={['Medicine', 'Barcode', 'Packaging', 'Units/pkg', 'Primary', 'Active']}>
+              {engine.db.medicineBarcodes.map(r => { const m = engine.db.medicines.find(x => x.id === r.medicineId); return <tr key={r.id} className={r.active ? '' : 'opacity-50'}>
+                <td>{m ? `${m.name} ${m.strength}` : '—'}</td><td className="font-mono text-xs">{r.barcode}</td><td>{r.packagingLevel}</td><td>{r.unitsPerPackage}</td>
+                <td>{r.isPrimary ? <Badge color="blue">primary</Badge> : '—'}</td><td>{r.active ? <Badge color="green">On</Badge> : <Badge>Off</Badge>}</td></tr>; })}
+            </Table>
+          )}
         </Card>
         <Card title="Change my password">
           <div className="grid grid-cols-2 gap-3">

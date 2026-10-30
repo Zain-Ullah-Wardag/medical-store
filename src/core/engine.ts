@@ -18,8 +18,15 @@
 import bcrypt from 'bcryptjs';
 import { toPaisa, todayStr, nowISO, addDays, percentOf } from './money';
 import * as T from './types';
+import { parseScan, gtinVariants, type ParsedScan } from './scanner';
 
 export class AppError extends Error {}
+
+export const defaultScannerSettings = (): T.ScannerSettings => ({
+  enabled: true, inputMode: 'both', autoDetectWedge: true, suffix: 'both',
+  defaultScanQty: 1, beepOnSuccess: true, beepOnError: true,
+  unknownBehavior: 'prompt', rapidDuplicateWindowMs: 350, cameraEnabled: true,
+});
 
 const emptySettings = (): T.Settings => ({
   storeName: '', address: '', phone: '', email: '', currency: 'PKR', taxRatePct: 0,
@@ -28,16 +35,59 @@ const emptySettings = (): T.Settings => ({
   paymentMethods: ['Cash', 'Card', 'Bank Transfer', 'JazzCash', 'EasyPaisa'],
   expenseCategories: ['Rent', 'Salaries', 'Electricity', 'Internet', 'Transportation', 'Packaging', 'Maintenance', 'Other'],
   printerName: '', backupRetention: 30, allowCashierReturns: false, allowCashierCredit: false, setupDone: false,
+  scanner: defaultScannerSettings(),
 });
 
 export const emptyDb = (): T.DbState => ({
-  version: 1, seq: {},
-  users: [], categories: [], medicines: [], batches: [], suppliers: [], customers: [],
+  version: 2, seq: {},
+  users: [], categories: [], medicines: [], medicineBarcodes: [], batches: [], suppliers: [], customers: [],
   purchases: [], purchaseItems: [], supplierPayments: [], sales: [], saleItems: [], salePayments: [],
   salesReturns: [], salesReturnItems: [], purchaseReturns: [], purchaseReturnItems: [],
   customerPayments: [], ledger: [], expenses: [], cashSessions: [], cashMovements: [],
   movements: [], audit: [], settings: emptySettings(),
 });
+
+/**
+ * In-place state migration v1 → v2 (mirrors database/migrations/002_barcodes.sql).
+ * Non-destructive: every existing medicine's single barcode becomes its PRIMARY
+ * packaging barcode (1 base unit per package). No records are deleted or reset.
+ * Safe to run repeatedly.
+ */
+export function migrateDb(db: T.DbState): T.DbState {
+  if (!Array.isArray(db.medicineBarcodes)) db.medicineBarcodes = [];
+  if (!db.settings.scanner) db.settings.scanner = defaultScannerSettings();
+  if ((db.version ?? 1) < 2) {
+    let nextId = (db.seq['medicineBarcodes'] ?? 0);
+    for (const m of db.medicines) {
+      const code = (m.barcode ?? '').trim();
+      if (code && !db.medicineBarcodes.some(b => b.barcode === code)) {
+        db.medicineBarcodes.push({
+          id: ++nextId, medicineId: m.id, barcode: code, packagingLevel: 'strip',
+          unitsPerPackage: 1, sellPricePaisa: 0, purchaseCostPaisa: 0, isPrimary: true, active: true,
+        });
+      }
+    }
+    db.seq['medicineBarcodes'] = nextId;
+    db.version = 2;
+  }
+  return db;
+}
+
+export interface ScanResolution {
+  status: 'found' | 'unknown' | 'invalid' | 'blocked';
+  parsed: ParsedScan;
+  medicine?: T.Medicine;
+  barcodeRecord?: T.MedicineBarcode;
+  /** Base-unit quantity one scan represents (before scanner defaultScanQty). */
+  baseQtyPerScan: number;
+  /** Selling price per BASE unit, exact paisa. */
+  unitPricePaisa: number;
+  packagingLabel: string;
+  /** Batch identified from GS1 AI (10) when it exists in stock records. */
+  matchedBatch?: T.Batch;
+  message: string;
+  warnings: string[];
+}
 
 type PersistFn = (db: T.DbState) => void;
 
@@ -178,18 +228,36 @@ export class Engine {
       this.db.categories = this.db.categories.filter(c => c.id !== id); this.log(actor, 'category.delete', `Category ${id}`);
     });
   }
+  /** Keeps Medicine.barcode (legacy display field) and the primary
+   *  MedicineBarcode record in sync. Called inside existing transactions. */
+  private syncPrimaryBarcode(m: T.Medicine) {
+    const code = (m.barcode ?? '').trim();
+    let rec = this.db.medicineBarcodes.find(b => b.medicineId === m.id && b.isPrimary);
+    if (!code) { if (rec) rec.active = false; return; }
+    if (rec) { rec.barcode = code; rec.active = true; return; }
+    rec = this.db.medicineBarcodes.find(b => b.barcode === code && b.medicineId === m.id);
+    if (rec) { rec.isPrimary = true; rec.active = true; return; }
+    this.db.medicineBarcodes.push({
+      id: this.id('medicineBarcodes'), medicineId: m.id, barcode: code, packagingLevel: 'strip',
+      unitsPerPackage: 1, sellPricePaisa: 0, purchaseCostPaisa: 0, isPrimary: true, active: true,
+    });
+  }
+  private assertBarcodeFree(code: string, exceptMedicineId?: number, exceptRecordId?: number) {
+    const rec = this.db.medicineBarcodes.find(b => b.active && b.barcode === code && b.id !== exceptRecordId && b.medicineId !== exceptMedicineId);
+    const med = this.db.medicines.find(m => m.barcode && m.barcode === code && m.id !== exceptMedicineId);
+    const owner = rec ? this.db.medicines.find(m => m.id === rec.medicineId) : med;
+    if (owner) throw new AppError(`Barcode ${code} is already assigned to "${owner.name}". Barcodes must be unique across all medicines and packaging levels.`);
+  }
   saveMedicine(actor: T.SessionUser, input: Partial<T.Medicine> & { name: string }): T.Medicine {
     this.require(actor, 'medicines.edit');
     if (!input.name.trim()) throw new AppError('Medicine name is required.');
     const barcode = (input.barcode ?? '').trim();
-    if (barcode) {
-      const dup = this.db.medicines.find(m => m.barcode === barcode && m.id !== input.id);
-      if (dup) throw new AppError(`Barcode ${barcode} is already assigned to "${dup.name}". Barcodes must be unique.`);
-    }
+    if (barcode) this.assertBarcodeFree(barcode, input.id);
     return this.tx(() => {
       if (input.id) {
         const m = this.medicine(input.id);
         Object.assign(m, input, { barcode, updatedAt: nowISO() });
+        this.syncPrimaryBarcode(m);
         this.log(actor, 'medicine.update', `${m.name}`); return m;
       }
       const m: T.Medicine = {
@@ -200,17 +268,146 @@ export class Engine {
         minStock: input.minStock ?? 10, prescription: input.prescription ?? 'OTC', storage: input.storage ?? '',
         notes: input.notes ?? '', active: input.active ?? true, createdAt: nowISO(), updatedAt: nowISO(),
       };
-      this.db.medicines.push(m); this.log(actor, 'medicine.create', m.name); return m;
+      this.db.medicines.push(m); this.syncPrimaryBarcode(m);
+      this.log(actor, 'medicine.create', m.name); return m;
     });
+  }
+
+  // ---------- medicine barcodes & packaging ----------
+  barcodesFor(medicineId: number): T.MedicineBarcode[] {
+    return this.db.medicineBarcodes.filter(b => b.medicineId === medicineId).sort((a, b) => Number(b.isPrimary) - Number(a.isPrimary) || a.id - b.id);
+  }
+  private validatePackagingPrices(units: number, sellPaisa: number, costPaisa: number) {
+    if (!Number.isInteger(units) || units < 1) throw new AppError('Units per package must be a whole number of at least 1.');
+    if (sellPaisa < 0 || costPaisa < 0) throw new AppError('Package price/cost cannot be negative.');
+    if (sellPaisa > 0 && sellPaisa % units !== 0)
+      throw new AppError(`Package selling price must divide exactly by ${units} base units (so each unit is a whole number of paisa). Adjust the package price or leave it 0 to inherit the per-unit price.`);
+    if (costPaisa > 0 && costPaisa % units !== 0)
+      throw new AppError(`Package purchase cost must divide exactly by ${units} base units. Adjust it or leave it 0 to inherit.`);
+  }
+  addMedicineBarcode(actor: T.SessionUser, input: { medicineId: number; barcode: string; packagingLevel: T.PackagingLevel; unitsPerPackage: number; sellPricePaisa: number; purchaseCostPaisa: number }): T.MedicineBarcode {
+    this.require(actor, 'medicines.edit');
+    const code = input.barcode.trim();
+    if (!code) throw new AppError('Barcode is required.');
+    this.medicine(input.medicineId);
+    this.assertBarcodeFree(code, input.medicineId);
+    if (this.db.medicineBarcodes.some(b => b.active && b.barcode === code && b.medicineId === input.medicineId))
+      throw new AppError('This medicine already has that barcode registered.');
+    this.validatePackagingPrices(input.unitsPerPackage, input.sellPricePaisa, input.purchaseCostPaisa);
+    return this.tx(() => {
+      const med = this.medicine(input.medicineId);
+      const isPrimary = !med.barcode;
+      const rec: T.MedicineBarcode = {
+        id: this.id('medicineBarcodes'), medicineId: input.medicineId, barcode: code,
+        packagingLevel: input.packagingLevel, unitsPerPackage: input.unitsPerPackage,
+        sellPricePaisa: input.sellPricePaisa, purchaseCostPaisa: input.purchaseCostPaisa,
+        isPrimary, active: true,
+      };
+      this.db.medicineBarcodes.push(rec);
+      if (isPrimary) med.barcode = code;
+      this.log(actor, 'barcode.add', `${med.name}: ${code} (${rec.packagingLevel} ×${rec.unitsPerPackage} ${med.unit})`);
+      return rec;
+    });
+  }
+  updateMedicineBarcode(actor: T.SessionUser, id: number, patch: Partial<Pick<T.MedicineBarcode, 'barcode' | 'packagingLevel' | 'unitsPerPackage' | 'sellPricePaisa' | 'purchaseCostPaisa' | 'active'>>) {
+    this.require(actor, 'medicines.edit');
+    return this.tx(() => {
+      const rec = this.db.medicineBarcodes.find(b => b.id === id);
+      if (!rec) throw new AppError('Barcode record not found.');
+      const next = { ...rec, ...patch, barcode: (patch.barcode ?? rec.barcode).trim() };
+      if (!next.barcode) throw new AppError('Barcode is required.');
+      this.assertBarcodeFree(next.barcode, rec.medicineId, rec.id);
+      this.validatePackagingPrices(next.unitsPerPackage, next.sellPricePaisa, next.purchaseCostPaisa);
+      Object.assign(rec, next);
+      const med = this.medicine(rec.medicineId);
+      if (rec.isPrimary) med.barcode = rec.active ? rec.barcode : '';
+      this.log(actor, 'barcode.update', `${med.name}: ${rec.barcode} (${rec.packagingLevel} ×${rec.unitsPerPackage})`);
+      return rec;
+    });
+  }
+  deleteMedicineBarcode(actor: T.SessionUser, id: number) {
+    this.require(actor, 'medicines.edit');
+    return this.tx(() => {
+      const rec = this.db.medicineBarcodes.find(b => b.id === id);
+      if (!rec) throw new AppError('Barcode record not found.');
+      this.db.medicineBarcodes = this.db.medicineBarcodes.filter(b => b.id !== id);
+      const med = this.medicine(rec.medicineId);
+      if (rec.isPrimary && med.barcode === rec.barcode) med.barcode = '';
+      this.log(actor, 'barcode.delete', `${med.name}: ${rec.barcode} removed`);
+    });
+  }
+  /** Finds a barcode record, tolerating GTIN-14 ↔ EAN-13/UPC zero-padding. */
+  findBarcodeRecord(code: string): T.MedicineBarcode | undefined {
+    const c = code.trim(); if (!c) return undefined;
+    const variants = gtinVariants(c);
+    return this.db.medicineBarcodes.find(b => b.active && variants.includes(b.barcode));
   }
   similarMedicines(name: string, excludeId?: number): T.Medicine[] {
     const n = name.trim().toLowerCase(); if (n.length < 3) return [];
     return this.db.medicines.filter(m => m.id !== excludeId && (m.name.toLowerCase().includes(n) || n.includes(m.name.toLowerCase())));
   }
-  findByBarcode(barcode: string): T.Medicine | undefined { return this.db.medicines.find(m => m.barcode && m.barcode === barcode.trim()); }
+  findByBarcode(barcode: string): T.Medicine | undefined {
+    const rec = this.findBarcodeRecord(barcode);
+    if (rec) return this.db.medicines.find(m => m.id === rec.medicineId);
+    return this.db.medicines.find(m => m.barcode && m.barcode === barcode.trim());
+  }
   searchMedicines(q: string): T.Medicine[] {
     const s = q.trim().toLowerCase(); if (!s) return [];
-    return this.db.medicines.filter(m => m.active && (m.name.toLowerCase().includes(s) || m.genericName.toLowerCase().includes(s) || m.brandName.toLowerCase().includes(s) || m.barcode === s)).slice(0, 15);
+    const barcodeHitIds = new Set(this.db.medicineBarcodes.filter(b => b.active && b.barcode.toLowerCase() === s).map(b => b.medicineId));
+    return this.db.medicines.filter(m => m.active && (barcodeHitIds.has(m.id) || m.name.toLowerCase().includes(s) || m.genericName.toLowerCase().includes(s) || m.brandName.toLowerCase().includes(s) || m.barcode === s)).slice(0, 15);
+  }
+
+  /**
+   * Interprets ONE raw scan for the POS/purchasing screens. Read-only:
+   * scanning NEVER changes stock — stock moves only in createSale.
+   * - GS1 batch AI (10) matches a stock batch when the number exists;
+   *   absent data is never invented (FEFO remains the fallback).
+   * - A scan identifying an expired / quarantined / damaged batch, or whose
+   *   own GS1 expiry date has passed, is BLOCKED, never silently substituted.
+   */
+  resolveScan(rawCode: string): ScanResolution {
+    const parsed = parseScan(rawCode);
+    const none: ScanResolution = { status: 'invalid', parsed, baseQtyPerScan: 0, unitPricePaisa: 0, packagingLabel: '', message: '', warnings: [...parsed.errors] };
+    if (parsed.kind === 'invalid' || parsed.kind === 'qr-text') {
+      none.message = parsed.errors[0] ?? 'This code does not contain a medicine barcode.';
+      return none;
+    }
+    const lookupCode = parsed.kind === 'gs1' ? (parsed.gs1?.gtin ?? '') : parsed.code;
+    let rec = lookupCode ? this.findBarcodeRecord(lookupCode) : undefined;
+    let med = rec ? this.db.medicines.find(m => m.id === rec!.medicineId) : (lookupCode ? this.findByBarcode(lookupCode) : undefined);
+    if (med && !rec) rec = this.db.medicineBarcodes.find(b => b.medicineId === med!.id && b.isPrimary && b.active);
+    if (!med) {
+      return { ...none, status: 'unknown', message: `Barcode "${lookupCode || parsed.raw}" is not registered to any medicine.` };
+    }
+    const warnings = [...parsed.errors];
+    const units = rec?.unitsPerPackage ?? 1;
+    const packagingLabel = rec ? (units > 1 ? `${rec.packagingLevel} ×${units} ${med.unit}` : rec.packagingLevel) : med.unit;
+    const firstBatch = this.eligibleBatches(med.id)[0];
+    const unitPricePaisa = rec && rec.sellPricePaisa > 0 ? Math.round(rec.sellPricePaisa / units) : (firstBatch?.sellPricePaisa || med.retailPricePaisa);
+    const res: ScanResolution = {
+      status: 'found', parsed, medicine: med, barcodeRecord: rec,
+      baseQtyPerScan: units, unitPricePaisa, packagingLabel, message: med.name, warnings,
+    };
+    const g = parsed.gs1;
+    if (g?.expiryDate && g.expiryDate <= todayStr()) {
+      return { ...res, status: 'blocked', message: `${med.name}: the scanned pack itself is EXPIRED (GS1 expiry ${g.expiryDate}). It must not be sold.` };
+    }
+    if (g?.batchNo) {
+      const batch = this.db.batches.find(b => b.medicineId === med!.id && b.batchNo.toLowerCase() === g.batchNo!.toLowerCase() && b.status !== 'written_off');
+      if (!batch) {
+        warnings.push(`Batch ${g.batchNo} from the code is not in stock records — FEFO allocation will be used. Receive it via Purchases if it is new stock.`);
+      } else if (batch.status !== 'active') {
+        return { ...res, status: 'blocked', matchedBatch: batch, message: `${med.name} batch ${batch.batchNo} is ${batch.status.replace('_', ' ')} and must not be sold.` };
+      } else if (this.isExpired(batch)) {
+        return { ...res, status: 'blocked', matchedBatch: batch, message: `${med.name} batch ${batch.batchNo} expired on ${batch.expiryDate} and must not be sold.` };
+      } else {
+        res.matchedBatch = batch;
+        if (g.expiryDate && g.expiryDate !== batch.expiryDate)
+          warnings.push(`Code expiry ${g.expiryDate} differs from recorded batch expiry ${batch.expiryDate} — verify the pack.`);
+        if (batch.qtyRemaining <= 0) warnings.push(`Batch ${batch.batchNo} has no recorded stock left; checkout will re-check and may reject.`);
+      }
+    }
+    return res;
   }
 
   // ---------- batches / stock ----------
@@ -252,18 +449,37 @@ export class Engine {
   }
 
   // ---------- FEFO ----------
-  private allocateFEFO(medicineId: number, qty: number): T.Allocation[] {
+  /**
+   * Allocates saleable stock. With `preferredBatchId` (from a GS1 scan that
+   * identified a physical pack's batch) that batch is used FIRST — but only
+   * if eligible; an expired/held scanned batch throws rather than being
+   * silently substituted. Any remainder falls back to normal FEFO order.
+   * `reserved` carries quantities already claimed by earlier lines of the
+   * same sale so two lines can never allocate the same physical units.
+   */
+  private allocateFEFO(medicineId: number, qty: number, preferredBatchId?: number, reserved?: Map<number, number>): T.Allocation[] {
     if (qty <= 0) throw new AppError('Quantity must be positive.');
     const med = this.medicine(medicineId);
+    const free = (b: T.Batch) => b.qtyRemaining - (reserved?.get(b.id) ?? 0);
     let remaining = qty; const allocs: T.Allocation[] = [];
-    for (const b of this.eligibleBatches(medicineId)) {
+    const eligible = this.eligibleBatches(medicineId);
+    let ordered = eligible;
+    if (preferredBatchId) {
+      const pref = this.db.batches.find(b => b.id === preferredBatchId);
+      if (!pref || pref.medicineId !== medicineId) throw new AppError(`Scanned batch does not belong to "${med.name}".`);
+      if (pref.status !== 'active' || this.isExpired(pref) || free(pref) <= 0)
+        throw new AppError(`Scanned batch ${pref.batchNo} of "${med.name}" is not saleable (status ${pref.status}, expiry ${pref.expiryDate}, remaining ${pref.qtyRemaining}). The sale was not completed.`);
+      ordered = [pref, ...eligible.filter(b => b.id !== pref.id)];
+    }
+    for (const b of ordered) {
       if (remaining <= 0) break;
-      const take = Math.min(b.qtyRemaining, remaining);
+      const take = Math.min(free(b), remaining);
+      if (take <= 0) continue;
       allocs.push({ batchId: b.id, batchNo: b.batchNo, expiryDate: b.expiryDate, qty: take, costPaisa: b.costPaisa });
       remaining -= take;
     }
     if (remaining > 0) {
-      const avail = this.saleableStock(medicineId);
+      const avail = eligible.reduce((s, b) => s + Math.max(0, free(b)), 0);
       throw new AppError(`Insufficient saleable stock for "${med.name}". Requested ${qty}, available ${avail} (expired/quarantined batches are excluded).`);
     }
     return allocs;
@@ -271,7 +487,7 @@ export class Engine {
 
   // ---------- sales ----------
   createSale(actor: T.SessionUser, input: {
-    customerId: number; items: { medicineId: number; qty: number; unitPricePaisa: number; discountPaisa: number }[];
+    customerId: number; items: { medicineId: number; qty: number; unitPricePaisa: number; discountPaisa: number; preferredBatchId?: number; packaging?: string }[];
     billDiscountPaisa: number; payments: { method: string; amountPaisa: number }[]; idempotencyKey: string;
   }): T.Sale {
     this.require(actor, 'pos');
@@ -280,22 +496,29 @@ export class Engine {
     if (input.items.length === 0) throw new AppError('Cart is empty.');
     return this.tx(() => {
       const s = this.db.settings;
-      // merge duplicate medicine lines
-      const merged = new Map<number, { medicineId: number; qty: number; unitPricePaisa: number; discountPaisa: number }>();
+      // merge duplicate lines — keyed by medicine AND scanned batch, so a
+      // GS1-identified line keeps its batch instead of merging into FEFO.
+      const merged = new Map<string, { medicineId: number; qty: number; unitPricePaisa: number; discountPaisa: number; preferredBatchId?: number; packaging?: string }>();
       for (const it of input.items) {
-        const cur = merged.get(it.medicineId);
-        if (cur) { cur.qty += it.qty; cur.discountPaisa += it.discountPaisa; } else merged.set(it.medicineId, { ...it });
+        const key = `${it.medicineId}|${it.preferredBatchId ?? ''}|${it.packaging ?? ''}`;
+        const cur = merged.get(key);
+        if (cur) { cur.qty += it.qty; cur.discountPaisa += it.discountPaisa; } else merged.set(key, { ...it });
       }
-      const lines: { med: T.Medicine; qty: number; unitPricePaisa: number; discountPaisa: number; lineTotal: number; allocations: T.Allocation[] }[] = [];
+      // Two lines for the same medicine (e.g. one scanned box, one FEFO strip)
+      // must not double-allocate the same units: the allocator is told what
+      // earlier lines in THIS sale already reserved from each batch.
+      const reserved = new Map<number, number>(); // batchId -> qty reserved in this sale
+      const lines: { med: T.Medicine; qty: number; unitPricePaisa: number; discountPaisa: number; lineTotal: number; allocations: T.Allocation[]; packaging?: string }[] = [];
       let subtotal = 0, lineDiscounts = 0;
       for (const it of merged.values()) {
         const med = this.medicine(it.medicineId);
         if (!med.active) throw new AppError(`"${med.name}" is inactive and cannot be sold.`);
-        const allocations = this.allocateFEFO(it.medicineId, it.qty); // rechecks stock + expiry NOW
+        const allocations = this.allocateFEFO(it.medicineId, it.qty, it.preferredBatchId, reserved); // rechecks stock + expiry NOW
+        for (const al of allocations) reserved.set(al.batchId, (reserved.get(al.batchId) ?? 0) + al.qty);
         const gross = it.unitPricePaisa * it.qty;
         if (it.discountPaisa < 0 || it.discountPaisa > gross) throw new AppError(`Invalid discount on "${med.name}".`);
         subtotal += gross; lineDiscounts += it.discountPaisa;
-        lines.push({ med, qty: it.qty, unitPricePaisa: it.unitPricePaisa, discountPaisa: it.discountPaisa, lineTotal: gross - it.discountPaisa, allocations });
+        lines.push({ med, qty: it.qty, unitPricePaisa: it.unitPricePaisa, discountPaisa: it.discountPaisa, lineTotal: gross - it.discountPaisa, allocations, packaging: it.packaging });
       }
       const discountTotal = lineDiscounts + (input.billDiscountPaisa || 0);
       if (discountTotal > subtotal) throw new AppError('Total discount cannot exceed the subtotal.');
@@ -315,7 +538,7 @@ export class Engine {
       const sale: T.Sale = { id: this.id('sales'), invoiceNo, dateTime: nowISO(), customerId: input.customerId, userId: actor.id, subtotalPaisa: subtotal, discountPaisa: discountTotal, taxPaisa, totalPaisa: total, paidPaisa: paid, idempotencyKey: input.idempotencyKey };
       this.db.sales.push(sale);
       for (const ln of lines) {
-        const item: T.SaleItem = { id: this.id('saleItems'), saleId: sale.id, medicineId: ln.med.id, medicineName: `${ln.med.name}${ln.med.strength ? ' ' + ln.med.strength : ''}`, qty: ln.qty, unitPricePaisa: ln.unitPricePaisa, discountPaisa: ln.discountPaisa, lineTotalPaisa: ln.lineTotal, allocations: ln.allocations };
+        const item: T.SaleItem = { id: this.id('saleItems'), saleId: sale.id, medicineId: ln.med.id, medicineName: `${ln.med.name}${ln.med.strength ? ' ' + ln.med.strength : ''}`, qty: ln.qty, unitPricePaisa: ln.unitPricePaisa, discountPaisa: ln.discountPaisa, lineTotalPaisa: ln.lineTotal, allocations: ln.allocations, packaging: ln.packaging };
         this.db.saleItems.push(item);
         for (const al of ln.allocations) {
           const b = this.batch(al.batchId); b.qtyRemaining -= al.qty;
@@ -660,7 +883,7 @@ export class Engine {
     if (!v.ok) throw new AppError('Backup validation failed: ' + v.errors.join(' '));
     const safety = this.exportBackup(); // caller downloads this BEFORE the swap
     const parsed = JSON.parse(json);
-    this.db = parsed.data as T.DbState;
+    this.db = migrateDb({ ...emptyDb(), ...(parsed.data as T.DbState) }); // older (v1) backups upgrade in place
     this.log(actor, 'backup.restore', `Restored backup exported at ${parsed.exportedAt}`);
     this.save();
     const issues = this.integrityCheck();
@@ -677,6 +900,12 @@ export class Engine {
     }
     const barcodes = new Map<string, number>();
     for (const m of this.db.medicines) if (m.barcode) { const c = (barcodes.get(m.barcode) ?? 0) + 1; barcodes.set(m.barcode, c); if (c === 2) issues.push(`Duplicate barcode ${m.barcode}`); }
+    const packBarcodes = new Map<string, number>();
+    for (const r of this.db.medicineBarcodes) {
+      if (r.active) { const c = (packBarcodes.get(r.barcode) ?? 0) + 1; packBarcodes.set(r.barcode, c); if (c === 2) issues.push(`Duplicate packaging barcode ${r.barcode}`); }
+      if (!this.db.medicines.some(m => m.id === r.medicineId)) issues.push(`Barcode ${r.barcode} references a missing medicine.`);
+      if (r.unitsPerPackage < 1) issues.push(`Barcode ${r.barcode} has invalid unitsPerPackage.`);
+    }
     const invNos = new Set<string>(); for (const s of this.db.sales) { if (invNos.has(s.invoiceNo)) issues.push(`Duplicate invoice ${s.invoiceNo}`); invNos.add(s.invoiceNo); }
     return issues;
   }
@@ -689,26 +918,33 @@ export class Engine {
     this.db.suppliers.push(sup);
     const med = (m: Partial<T.Medicine> & { name: string }): T.Medicine => {
       const full: T.Medicine = { id: this.id('medicines'), genericName: '', brandName: '', barcode: '', categoryId: null, manufacturer: '', strength: '', dosageForm: 'Tablet', packSize: '', unit: 'strip', defaultCostPaisa: 0, retailPricePaisa: 0, minStock: 20, prescription: 'OTC', storage: 'Cool & dry place', notes: '', active: true, createdAt: nowISO(), updatedAt: nowISO(), ...m };
-      this.db.medicines.push(full); return full;
+      this.db.medicines.push(full); this.syncPrimaryBarcode(full); return full;
     };
     const batch = (medicineId: number, batchNo: string, expiry: string, qty: number, costR: number, sellR: number) => {
       const b: T.Batch = { id: this.id('batches'), medicineId, batchNo, supplierId: sup.id, purchaseId: null, mfgDate: '', expiryDate: expiry, receivedDate: todayStr(), qtyReceived: qty, qtyRemaining: qty, costPaisa: toPaisa(costR), sellPricePaisa: toPaisa(sellR), status: 'active' };
       this.db.batches.push(b); this.move(actor, medicineId, b.id, 'opening_stock', qty, `BATCH-${b.id}`, 'Sample opening stock', b.costPaisa);
     };
-    const panadol = med({ name: 'Panadol Extra', genericName: 'Paracetamol + Caffeine', brandName: 'Panadol', barcode: '8964001234501', categoryId: pain, manufacturer: 'GSK', strength: '500mg', packSize: '10 tablets/strip', retailPricePaisa: toPaisa(35), defaultCostPaisa: toPaisa(28) });
+    const panadol = med({ name: 'Panadol Extra', genericName: 'Paracetamol + Caffeine', brandName: 'Panadol', barcode: '8964001234500', categoryId: pain, manufacturer: 'GSK', strength: '500mg', packSize: '10 tablets/strip', retailPricePaisa: toPaisa(35), defaultCostPaisa: toPaisa(28) });
     batch(panadol.id, 'PN-2401', addDays(todayStr(), 45), 100, 26, 35);           // earlier expiry → FEFO sells this first
     batch(panadol.id, 'PN-2408', addDays(todayStr(), 400), 200, 28, 35);
-    const brufen = med({ name: 'Brufen', genericName: 'Ibuprofen', brandName: 'Brufen', barcode: '8964001234502', categoryId: pain, manufacturer: 'Abbott', strength: '400mg', retailPricePaisa: toPaisa(60), defaultCostPaisa: toPaisa(48) });
+    const brufen = med({ name: 'Brufen', genericName: 'Ibuprofen', brandName: 'Brufen', barcode: '8964001234517', categoryId: pain, manufacturer: 'Abbott', strength: '400mg', retailPricePaisa: toPaisa(60), defaultCostPaisa: toPaisa(48) });
     batch(brufen.id, 'BR-110', addDays(todayStr(), 300), 80, 48, 60);
-    const augmentin = med({ name: 'Augmentin', genericName: 'Co-Amoxiclav', brandName: 'Augmentin', barcode: '8964001234503', categoryId: anti, manufacturer: 'GSK', strength: '375mg', prescription: 'Rx', retailPricePaisa: toPaisa(420), defaultCostPaisa: toPaisa(360) });
+    const augmentin = med({ name: 'Augmentin', genericName: 'Co-Amoxiclav', brandName: 'Augmentin', barcode: '8964001234524', categoryId: anti, manufacturer: 'GSK', strength: '375mg', prescription: 'Rx', retailPricePaisa: toPaisa(420), defaultCostPaisa: toPaisa(360) });
     batch(augmentin.id, 'AG-77', addDays(todayStr(), 200), 40, 360, 420);
     batch(augmentin.id, 'AG-OLD', addDays(todayStr(), -20), 15, 350, 420);        // expired on purpose — must never be sold
-    const hydryllin = med({ name: 'Hydryllin Syrup', genericName: 'Diphenhydramine', brandName: 'Hydryllin', barcode: '8964001234504', categoryId: cold, manufacturer: 'Searle', strength: '120ml', dosageForm: 'Syrup', unit: 'bottle', retailPricePaisa: toPaisa(180), defaultCostPaisa: toPaisa(145) });
+    const hydryllin = med({ name: 'Hydryllin Syrup', genericName: 'Diphenhydramine', brandName: 'Hydryllin', barcode: '8964001234531', categoryId: cold, manufacturer: 'Searle', strength: '120ml', dosageForm: 'Syrup', unit: 'bottle', retailPricePaisa: toPaisa(180), defaultCostPaisa: toPaisa(145) });
     batch(hydryllin.id, 'HY-31', addDays(todayStr(), 25), 30, 145, 180);          // near expiry alert
-    const surbex = med({ name: 'Surbex-Z', genericName: 'Multivitamin + Zinc', brandName: 'Surbex-Z', barcode: '8964001234505', categoryId: supp, manufacturer: 'Abbott', strength: '30 tablets', unit: 'bottle', retailPricePaisa: toPaisa(1450), defaultCostPaisa: toPaisa(1200), minStock: 15 });
+    const surbex = med({ name: 'Surbex-Z', genericName: 'Multivitamin + Zinc', brandName: 'Surbex-Z', barcode: '8964001234548', categoryId: supp, manufacturer: 'Abbott', strength: '30 tablets', unit: 'bottle', retailPricePaisa: toPaisa(1450), defaultCostPaisa: toPaisa(1200), minStock: 15 });
     batch(surbex.id, 'SZ-09', addDays(todayStr(), 500), 10, 1200, 1450);          // low stock alert
     const cust: T.Customer = { id: this.id('customers'), name: 'Muhammad (Sample)', phone: '0321-0000000', address: 'Mardan', openingBalancePaisa: 0, notes: 'Sample customer — delete when ready', active: true };
     this.db.customers.push(cust);
+    // Sample packaging barcode: one Panadol BOX = 10 strips @ Rs 350/box.
+    // Scanning it in POS adds 10 strips worth of stock consumption.
+    this.db.medicineBarcodes.push({
+      id: this.id('medicineBarcodes'), medicineId: panadol.id, barcode: '8964001234593',
+      packagingLevel: 'box', unitsPerPackage: 10, sellPricePaisa: toPaisa(350), purchaseCostPaisa: toPaisa(280),
+      isPrimary: false, active: true,
+    });
     this.log(actor, 'seed', 'Sample starter catalog loaded');
   }
   clearAllData(actor: T.SessionUser, keepUsers: boolean) {

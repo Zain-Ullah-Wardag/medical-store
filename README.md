@@ -88,17 +88,24 @@ Download backup now**, and copy the file to a USB drive kept off the PC.
 To restore: select the file → it is validated → your current data is first
 downloaded as a safety copy → restore runs → integrity is verified.
 
-## 6. Barcode scanner setup
+## 6. Barcode / QR scanner setup
 
-Any standard USB barcode scanner works — they behave like keyboards:
-1. Plug it in. No driver needed (test in Notepad: scanning should type digits).
-2. Open **Point of Sale**. The barcode box is focused automatically (press
-   **F2** any time to refocus it). Scan → item lands in the cart; scan again →
-   quantity +1. **F4** = search by name, **F9** = complete sale.
-3. Unknown barcode? You'll get a clear message — register the medicine under
-   **Medicines** (scan its barcode into the Barcode field). Products without a
-   printed barcode can be given any unique code (e.g. `MS-1001`) and found by
-   typing it; barcodes are enforced unique.
+**Full guide: [`docs/SCANNER_SETUP.md`](docs/SCANNER_SETUP.md).** Short version:
+
+- Any USB 1D or 2D scanner in **HID keyboard (wedge) mode** works — no drivers.
+  2D models additionally read **QR + GS1 DataMatrix** (GTIN, batch, expiry and
+  serial are parsed and matched to stock batches; expired/held scanned batches
+  are blocked, never silently swapped). Enter or Tab suffix — both accepted.
+- At **Point of Sale** you can scan anywhere on the screen (fast scanner bursts
+  are auto-detected), with beep + on-screen confirmation and a configurable
+  duplicate-scan guard. **F2** focuses the barcode box, **F4** search,
+  **F9** complete sale. Configure everything under
+  **Settings → 🔫 Barcode & Scanner**, including a live *Test scanner* tool.
+- One medicine can carry **multiple barcodes for packaging levels**
+  (box/bottle/strip/unit) — Medicines → View → *Barcodes & packaging*.
+  Scanning a box of 10 strips adds 10 strips at the box price; stock is always
+  counted in base units. Unknown barcodes are never added to a sale —
+  authorized users can register them on the spot.
 
 ## 7. Receipt printing
 

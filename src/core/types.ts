@@ -12,6 +12,39 @@ export interface Medicine {
   active: boolean; createdAt: string; updatedAt: string;
 }
 
+/** Packaging levels a barcode can represent. Stock is always kept in the
+ *  medicine's base unit (Medicine.unit, e.g. "strip"); a barcode record says
+ *  how many base units one scan of that package contains. */
+export type PackagingLevel = 'box' | 'bottle' | 'strip' | 'unit';
+export interface MedicineBarcode {
+  id: number; medicineId: number; barcode: string; packagingLevel: PackagingLevel;
+  /** Base units contained in ONE package of this level (box of 10 strips = 10). */
+  unitsPerPackage: number;
+  /** Price of ONE package in paisa; 0 = inherit medicine/batch price.
+   *  Must divide exactly by unitsPerPackage so per-unit paisa stay exact. */
+  sellPricePaisa: number;
+  /** Purchase cost of ONE package in paisa; 0 = inherit. Same exactness rule. */
+  purchaseCostPaisa: number;
+  isPrimary: boolean; active: boolean;
+}
+
+export interface ScannerSettings {
+  enabled: boolean;
+  /** dedicated = only the POS barcode box; wedge-anywhere = fast keyboard bursts
+   *  anywhere on the POS screen are treated as scans; both = either. */
+  inputMode: 'dedicated' | 'wedge-anywhere' | 'both';
+  autoDetectWedge: boolean;
+  suffix: 'enter' | 'tab' | 'both';
+  /** Packages added per physical scan (usually 1). */
+  defaultScanQty: number;
+  beepOnSuccess: boolean; beepOnError: boolean;
+  unknownBehavior: 'prompt' | 'warn-only';
+  /** Identical codes arriving within this window count as ONE physical scan
+   *  (protects against scanners/enter-handlers double-firing). 0 = off. */
+  rapidDuplicateWindowMs: number;
+  cameraEnabled: boolean;
+}
+
 export type BatchStatus = 'active' | 'quarantine' | 'damaged' | 'recalled' | 'written_off';
 export interface Batch {
   id: number; medicineId: number; batchNo: string; supplierId: number | null; purchaseId: number | null;
@@ -28,7 +61,7 @@ export interface SupplierPayment { id: number; supplierId: number; date: string;
 
 export interface Allocation { batchId: number; batchNo: string; expiryDate: string; qty: number; costPaisa: number; }
 export interface Sale { id: number; invoiceNo: string; dateTime: string; customerId: number; userId: number; subtotalPaisa: number; discountPaisa: number; taxPaisa: number; totalPaisa: number; paidPaisa: number; idempotencyKey: string; }
-export interface SaleItem { id: number; saleId: number; medicineId: number; medicineName: string; qty: number; unitPricePaisa: number; discountPaisa: number; lineTotalPaisa: number; allocations: Allocation[]; }
+export interface SaleItem { id: number; saleId: number; medicineId: number; medicineName: string; qty: number; unitPricePaisa: number; discountPaisa: number; lineTotalPaisa: number; allocations: Allocation[]; /** e.g. "box ×10 strips" when sold via a packaging barcode */ packaging?: string; }
 export interface SalePayment { id: number; saleId: number; method: string; amountPaisa: number; dateTime: string; }
 
 export interface SalesReturn { id: number; returnNo: string; saleId: number; dateTime: string; userId: number; refundPaisa: number; method: 'cash' | 'credit' | 'card' | 'bank'; reason: string; }
@@ -51,11 +84,12 @@ export interface Settings {
   nextSaleReturnSeq: number; nextPurchaseReturnSeq: number; receiptFooter: string;
   paymentMethods: string[]; expenseCategories: string[]; printerName: string;
   backupRetention: number; allowCashierReturns: boolean; allowCashierCredit: boolean; setupDone: boolean;
+  scanner: ScannerSettings;
 }
 
 export interface DbState {
   version: number; seq: Record<string, number>;
-  users: User[]; categories: Category[]; medicines: Medicine[]; batches: Batch[];
+  users: User[]; categories: Category[]; medicines: Medicine[]; medicineBarcodes: MedicineBarcode[]; batches: Batch[];
   suppliers: Supplier[]; customers: Customer[]; purchases: Purchase[]; purchaseItems: PurchaseItem[];
   supplierPayments: SupplierPayment[]; sales: Sale[]; saleItems: SaleItem[]; salePayments: SalePayment[];
   salesReturns: SalesReturn[]; salesReturnItems: SalesReturnItem[]; purchaseReturns: PurchaseReturn[];

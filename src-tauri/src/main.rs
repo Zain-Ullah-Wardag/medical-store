@@ -51,22 +51,28 @@ fn migrate(conn: &Connection) -> Result<(), String> {
          );",
     )
     .map_err(|e| e.to_string())?;
-    // Apply bundled relational schema (migration 001) exactly once.
-    let applied: bool = conn
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version = 1)",
-            [],
-            |r| r.get(0),
-        )
-        .map_err(|e| e.to_string())?;
-    if !applied {
-        conn.execute_batch(include_str!("../../database/migrations/001_initial.sql"))
+    // Apply bundled relational migrations exactly once each, in version order.
+    // 001 = initial schema, 002 = multi-barcode packaging (non-destructive).
+    const MIGRATIONS: &[(i64, &str)] = &[
+        (1, include_str!("../../database/migrations/001_initial.sql")),
+        (2, include_str!("../../database/migrations/002_barcodes.sql")),
+    ];
+    for (version, sql) in MIGRATIONS {
+        let applied: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version = ?1)",
+                [version],
+                |r| r.get(0),
+            )
             .map_err(|e| e.to_string())?;
-        conn.execute(
-            "INSERT INTO schema_migrations (version, applied_at) VALUES (1, datetime('now'))",
-            [],
-        )
-        .map_err(|e| e.to_string())?;
+        if !applied {
+            conn.execute_batch(sql).map_err(|e| e.to_string())?;
+            conn.execute(
+                "INSERT INTO schema_migrations (version, applied_at) VALUES (?1, datetime('now'))",
+                [version],
+            )
+            .map_err(|e| e.to_string())?;
+        }
     }
     Ok(())
 }

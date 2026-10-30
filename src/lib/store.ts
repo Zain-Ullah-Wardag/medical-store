@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Engine, emptyDb } from '../core/engine';
+import { Engine, emptyDb, migrateDb } from '../core/engine';
 import type { DbState, SessionUser } from '../core/types';
 
 /**
@@ -15,7 +15,9 @@ const SES_KEY = 'medstore-session';
 function load(): DbState {
   try {
     const raw = localStorage.getItem(KEY);
-    if (raw) return { ...emptyDb(), ...JSON.parse(raw) };
+    // migrateDb upgrades older saved states in place (e.g. v1 → v2 barcodes)
+    // without touching any existing business records.
+    if (raw) return migrateDb({ ...emptyDb(), ...JSON.parse(raw) });
   } catch { /* corrupted storage -> start fresh, user can restore a backup */ }
   return emptyDb();
 }

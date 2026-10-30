@@ -42,6 +42,27 @@ export function Purchases({ user }: { user: SessionUser }) {
 
 function PurchaseForm({ user, close }: { user: SessionUser; close: () => void }) {
   const db = engine.db;
+  const [scanCode, setScanCode] = useState('');
+  const onScan = (raw: string) => {
+    setScanCode('');
+    const r = engine.resolveScan(raw);
+    if ((r.status !== 'found' && r.status !== 'blocked') || !r.medicine) { toast(r.message || 'Barcode not registered — add the medicine/barcode first.', true); return; }
+    const m = r.medicine;
+    const rec = r.barcodeRecord;
+    const costPerUnit = rec && rec.purchaseCostPaisa > 0 ? rec.purchaseCostPaisa / rec.unitsPerPackage : m.defaultCostPaisa;
+    const line: PLine = {
+      medicineId: m.id,
+      batchNo: r.parsed.gs1?.batchNo ?? '',
+      mfgDate: r.parsed.gs1?.productionDate ?? '',
+      expiryDate: r.parsed.gs1?.expiryDate ?? '',
+      qty: String(r.baseQtyPerScan),
+      costRs: String(costPerUnit / 100 || ''),
+      sellRs: String(r.unitPricePaisa / 100 || ''),
+    };
+    setLines(ls => (ls.length === 1 && !ls[0].medicineId ? [line] : [...ls, line]));
+    toast(`Scanned: ${m.name} — ${r.packagingLabel}${line.batchNo ? ` · batch ${line.batchNo}` : ''}${line.expiryDate ? ` · exp ${line.expiryDate}` : ''}. Check quantity (base units) and batch details, then save.`);
+    r.warnings.forEach(w => toast('⚠ ' + w));
+  };
   const [supplierId, setSupplierId] = useState(String(db.suppliers[0]?.id ?? ''));
   const [invoiceNo, setInvoiceNo] = useState(''); const [date, setDate] = useState(todayStr());
   const [lines, setLines] = useState<PLine[]>([{ medicineId: 0, batchNo: '', mfgDate: '', expiryDate: '', qty: '', costRs: '', sellRs: '' }]);
@@ -63,6 +84,13 @@ function PurchaseForm({ user, close }: { user: SessionUser; close: () => void })
   };
   return (
     <Modal title="New purchase (receive stock)" onClose={close} wide>
+      <div className="mb-4">
+        <Field label="🔫 Scan to add line (barcode / GS1 DataMatrix — batch & expiry auto-fill when present in the code)">
+          <input className={inputCls} value={scanCode} onChange={e => setScanCode(e.target.value)}
+            onKeyDown={e => { if (e.key === 'Enter' || e.key === 'Tab') { e.preventDefault(); onScan(scanCode); } }}
+            placeholder="Scan supplier stock here — quantities convert to base units via packaging barcodes" />
+        </Field>
+      </div>
       <div className="grid md:grid-cols-3 gap-3 mb-4">
         <Field label="Supplier *"><select className={inputCls} value={supplierId} onChange={e => setSupplierId(e.target.value)}>
           <option value="">Select supplier…</option>{db.suppliers.filter(s => s.active).map(s => <option key={s.id} value={s.id}>{s.name}</option>)}</select></Field>

@@ -27,7 +27,7 @@ export function Receipt({ sale }: { sale: Sale }) {
       <div className="border-t border-dashed border-black my-2" />
       {items.map(i => (
         <div key={i.id}>
-          <div className="flex justify-between"><span className="pr-2">{i.medicineName}</span><span>{money(i.lineTotalPaisa)}</span></div>
+          <div className="flex justify-between"><span className="pr-2">{i.medicineName}{i.packaging ? ` (${i.packaging})` : ''}</span><span>{money(i.lineTotalPaisa)}</span></div>
           <div className="text-[11px] flex justify-between"><span>{i.qty} × {money(i.unitPricePaisa)}{i.discountPaisa ? ` − disc ${money(i.discountPaisa)}` : ''}</span>
             <span>{i.allocations.map(a => `${a.batchNo}`).join(', ')}</span></div>
         </div>
