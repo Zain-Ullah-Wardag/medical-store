@@ -29,6 +29,20 @@ export const todayStr = (d = new Date()): string => {
   return `${y}-${m}-${dd}`;
 };
 export const nowISO = (): string => new Date().toISOString();
+/**
+ * The LOCAL calendar date (YYYY-MM-DD) of a stored timestamp.
+ * dateTime values are stored as UTC ISO strings; slicing the first 10 chars
+ * gives the UTC date, which in Pakistan (UTC+5) wrongly attributes anything
+ * recorded between midnight and 05:00 to the previous business day.
+ * ALWAYS use this for day-level filtering/grouping. Plain YYYY-MM-DD inputs
+ * pass through unchanged.
+ */
+export const localDateOf = (iso: string): string => {
+  if (!iso) return '';
+  if (iso.length === 10) return iso;
+  const d = new Date(iso);
+  return isNaN(d.getTime()) ? iso.slice(0, 10) : todayStr(d);
+};
 export const addDays = (dateStr: string, days: number): string => {
   const d = new Date(dateStr + 'T00:00:00'); d.setDate(d.getDate() + days); return todayStr(d);
 };

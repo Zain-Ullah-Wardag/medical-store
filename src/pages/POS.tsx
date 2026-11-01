@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { engine, uid } from '../lib/store';
-import { Page, Card, Btn, Modal, Field, inputCls, money, toast, fmtDate, Badge, Confirm, run } from '../components/ui';
+import { Page, Card, Btn, Modal, Field, inputCls, money, toast, fmtDate, Badge, Confirm, run, medLabel } from '../components/ui';
 import { toPaisa, percentOf } from '../core/money';
 import type { Medicine, PackagingLevel, Sale, SessionUser } from '../core/types';
 import { can } from '../core/types';
@@ -91,7 +91,7 @@ export function POS({ user }: { user: SessionUser }) {
     if (sc.beepOnSuccess) beepSuccess();
     setBanner({
       ok: true,
-      text: `✓ ${r.medicine.name} ${r.medicine.strength}`,
+      text: `✓ ${medLabel(r.medicine)}`,
       sub: `${r.packagingLabel} · +${qty} ${r.medicine.unit} · ${money(r.unitPricePaisa)} each` +
         (r.matchedBatch ? ` · Batch ${r.matchedBatch.batchNo} (exp ${fmtDate(r.matchedBatch.expiryDate)})` : ' · FEFO batch') +
         (r.parsed.format ? ` · ${r.parsed.format}` : ''),
@@ -211,7 +211,7 @@ export function POS({ user }: { user: SessionUser }) {
                   return (
                     <button key={m.id} onClick={() => { addMed(m); setSearch(''); barcodeRef.current?.focus(); }}
                       className="w-full flex items-center justify-between py-2 px-1 text-left hover:bg-teal-50 dark:hover:bg-slate-700/40 rounded">
-                      <span><span className="font-semibold text-slate-800 dark:text-slate-100">{m.name} {m.strength}</span>
+                      <span><span className="font-semibold text-slate-800 dark:text-slate-100">{medLabel(m)}</span>
                         <span className="block text-xs text-slate-400">{m.genericName} · {m.packSize} · {m.barcode || 'no barcode'}</span></span>
                       <span className="text-right"><span className="font-bold text-teal-700 dark:text-teal-300">{money(m.retailPricePaisa)}</span>
                         <span className="block text-xs">{st > 0 ? <Badge color="green">{st} in stock</Badge> : <Badge color="red">Out of stock</Badge>}</span></span>
@@ -230,7 +230,7 @@ export function POS({ user }: { user: SessionUser }) {
                   return (
                     <div key={l.key} className="flex flex-wrap items-center gap-2 border border-slate-100 dark:border-slate-700 rounded-xl p-2.5">
                       <div className="flex-1 min-w-[170px]">
-                        <div className="font-semibold text-sm text-slate-800 dark:text-slate-100">{m.name} {m.strength}
+                        <div className="font-semibold text-sm text-slate-800 dark:text-slate-100">{medLabel(m)}
                           {l.packaging && <Badge color="blue"> {l.packaging}</Badge>}
                           {l.scannedBatchNo && <Badge color="green"> scanned batch {l.scannedBatchNo}</Badge>}
                         </div>
@@ -251,7 +251,8 @@ export function POS({ user }: { user: SessionUser }) {
                     </div>
                   );
                 })}
-                <div className="text-right"><button className="text-xs text-red-500 font-semibold" onClick={() => setConfirmClear(true)}>Clear cart (cancel sale — no stock has moved)</button></div>
+                <button onClick={() => setConfirmClear(true)} title="Remove all lines and start a fresh sale. No stock has moved yet — nothing is posted until checkout."
+                  className="w-full mt-2 px-3.5 py-2.5 rounded-lg text-sm font-bold bg-red-600 text-white shadow hover:bg-red-500 active:scale-[0.98] focus:outline-none focus:ring-2 focus:ring-red-400 transition">🧹 Clear Cart — cancel this sale</button>
               </div>
             )}
           </Card>
@@ -355,7 +356,7 @@ function UnknownBarcodeModal({ user, code, close, onRegistered }: { user: Sessio
             <div className="max-h-36 overflow-y-auto divide-y divide-slate-100 dark:divide-slate-700">
               {results.map(m => (
                 <button key={m.id} onClick={() => setMedId(m.id)} className={`w-full text-left text-sm py-1.5 px-1 rounded ${medId === m.id ? 'bg-teal-100 dark:bg-teal-900/50 font-semibold' : 'hover:bg-slate-50 dark:hover:bg-slate-700/40'}`}>
-                  {m.name} {m.strength} <span className="text-slate-400">· stock unit: {m.unit}</span>
+                  {medLabel(m)} <span className="text-slate-400">· stock unit: {m.unit}</span>
                 </button>
               ))}
             </div>

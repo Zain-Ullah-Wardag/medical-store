@@ -100,3 +100,14 @@ With the sample catalog loaded you can type these into the test box:
 - `8964001234593` — Panadol Extra **box of 10 strips**
 - `(01)08964001234500(17)271231(10)PN-2401(21)SN001` — sample GS1 DataMatrix
   payload (GTIN + expiry 2027-12-31 + batch PN-2401 + serial SN001)
+
+
+## GS1 batch/expiry verification (important)
+
+When a GS1 code carries a batch number, the app verifies it against stock records:
+- batch not in stock records → **scan blocked** (receive it via Purchases first);
+- code expiry different from the recorded batch expiry → **scan blocked** (verify the pack, correct the batch record);
+- batch quarantined / damaged / written off / expired → **scan blocked**.
+
+The app never silently substitutes a different batch for a scanned pack. Plain barcodes (no batch in the code)
+continue to use normal FEFO allocation.

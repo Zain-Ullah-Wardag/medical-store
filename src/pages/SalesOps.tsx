@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react';
 import { engine } from '../lib/store';
-import { Page, Card, Btn, Modal, Field, inputCls, money, Table, Badge, Empty, run, fmtDate, fmtDateTime, downloadFile, toCSV } from '../components/ui';
+import { Page, Card, Btn, Modal, Field, inputCls, money, Table, Badge, Empty, run, fmtDate, fmtDateTime, ExportBtn, medLabel } from '../components/ui';
 import { todayStr } from '../core/money';
 import type { Sale, SessionUser } from '../core/types';
 import { can } from '../core/types';
@@ -11,25 +11,18 @@ export function SalesHistory({ user }: { user: SessionUser }) {
   const [from, setFrom] = useState(todayStr()); const [to, setTo] = useState(todayStr());
   const [q, setQ] = useState(''); const [cashierId, setCashierId] = useState(''); const [methodF, setMethodF] = useState('');
   const [detail, setDetail] = useState<Sale | null>(null); const [printSale, setPrintSale] = useState<Sale | null>(null);
-  const rows = db.sales.filter(s => {
-    const d = s.dateTime.slice(0, 10);
-    if (d < from || d > to) return false;
-    if (user.role === 'cashier' && s.userId !== user.id) return false;
-    if (q && !s.invoiceNo.toLowerCase().includes(q.toLowerCase()) && !(db.customers.find(c => c.id === s.customerId)?.name ?? '').toLowerCase().includes(q.toLowerCase())) return false;
-    if (cashierId && String(s.userId) !== cashierId) return false;
-    if (methodF && !db.salePayments.some(p => p.saleId === s.id && p.method === methodF)) return false;
-    return true;
-  }).sort((a, b) => b.id - a.id);
+  // Engine-enforced visibility: cashiers only ever receive their own sales.
+  const rows = engine.listSales(user, { from, to, query: q, cashierId: cashierId ? Number(cashierId) : null, method: methodF });
   return (
-    <Page title="Sales History" sub="Completed invoices are never deleted — corrections go through Sales Returns."
-      actions={<Btn kind="ghost" onClick={() => downloadFile('sales-history.csv', toCSV(rows.map(s => ({ Invoice: s.invoiceNo, Date: s.dateTime, TotalPKR: s.totalPaisa / 100, PaidPKR: s.paidPaisa / 100 }))), 'text/csv')}>Export CSV</Btn>}>
+    <Page title="Sales History" sub={user.role === 'cashier' ? 'Showing only your own sales. Completed invoices are never deleted — corrections go through Sales Returns.' : 'Completed invoices are never deleted — corrections go through Sales Returns.'}
+      actions={<ExportBtn filename={`sales-history-${from}-to-${to}.csv`} headerLine={`${db.settings.storeName} — Sales history — ${from} to ${to} — generated ${new Date().toLocaleString('en-PK')}`} rows={rows.map(s => ({ Invoice: s.invoiceNo, DateTime: s.dateTime, Customer: db.customers.find(c => c.id === s.customerId)?.name ?? '', Cashier: db.users.find(u => u.id === s.userId)?.fullName ?? '', TotalPKR: s.totalPaisa / 100, PaidPKR: (s.paidPaisa + db.customerPayments.filter(p => p.saleId === s.id).reduce((x, p) => x + p.amountPaisa, 0)) / 100 }))} />}>
       <Card>
         <div className="grid md:grid-cols-5 gap-2 mb-3">
-          <input type="date" className={inputCls} value={from} onChange={e => setFrom(e.target.value)} />
-          <input type="date" className={inputCls} value={to} onChange={e => setTo(e.target.value)} />
-          <input className={inputCls} placeholder="Invoice no. or customer…" value={q} onChange={e => setQ(e.target.value)} />
-          <select className={inputCls} value={cashierId} onChange={e => setCashierId(e.target.value)}><option value="">All cashiers</option>{db.users.map(u => <option key={u.id} value={u.id}>{u.fullName}</option>)}</select>
-          <select className={inputCls} value={methodF} onChange={e => setMethodF(e.target.value)}><option value="">All payment methods</option>{db.settings.paymentMethods.map(m => <option key={m}>{m}</option>)}</select>
+          <Field label="Date from (inclusive)"><input type="date" className={inputCls} value={from} onChange={e => setFrom(e.target.value)} /></Field>
+          <Field label="Date to (inclusive)"><input type="date" className={inputCls} value={to} onChange={e => setTo(e.target.value)} /></Field>
+          <Field label="Invoice no. or customer"><input className={inputCls} placeholder="INV-000001 or Ali…" value={q} onChange={e => setQ(e.target.value)} /></Field>
+          <Field label="Cashier"><select className={inputCls} value={cashierId} onChange={e => setCashierId(e.target.value)}><option value="">All cashiers</option>{db.users.map(u => <option key={u.id} value={u.id}>{u.fullName}</option>)}</select></Field>
+          <Field label="Payment method"><select className={inputCls} value={methodF} onChange={e => setMethodF(e.target.value)}><option value="">All payment methods</option>{db.settings.paymentMethods.map(m => <option key={m}>{m}</option>)}</select></Field>
         </div>
         {rows.length === 0 ? <Empty text="No sales in this filter range." /> : (
           <Table head={['Invoice', 'Date & time', 'Customer', 'Cashier', 'Total', 'Paid', 'Due', 'Status', '']}>
@@ -131,6 +124,7 @@ export function SalesReturns({ user }: { user: SessionUser }) {
 
 export function PurchaseReturns({ user }: { user: SessionUser }) {
   const db = engine.db;
+  const [detailId, setDetailId] = useState<number | null>(null);
   const [supplierId, setSupplierId] = useState(String(db.suppliers[0]?.id ?? ''));
   const [qtys, setQtys] = useState<Record<number, number>>({}); const [reason, setReason] = useState('');
   const batches = db.batches.filter(b => b.supplierId === Number(supplierId) && b.qtyRemaining > 0);
@@ -150,7 +144,7 @@ export function PurchaseReturns({ user }: { user: SessionUser }) {
           <div className="mt-3">
             {batches.length === 0 ? <Empty text="No batches with stock for this supplier." /> : (
               <Table head={['Medicine · batch', 'Expiry', 'On hand', 'Return qty']}>
-                {batches.map(b => <tr key={b.id}><td>{engine.medicine(b.medicineId).name} · {b.batchNo}{engine.isExpired(b) && <Badge color="red"> expired</Badge>}</td><td>{fmtDate(b.expiryDate)}</td><td>{b.qtyRemaining}</td>
+                {batches.map(b => <tr key={b.id}><td className="min-w-[230px]"><div className="font-semibold leading-snug">{medLabel(engine.medicine(b.medicineId))}</div><div className="text-xs text-slate-400">Batch {b.batchNo}{engine.isExpired(b) && <> · <Badge color="red">expired</Badge></>}</div></td><td className="whitespace-nowrap">{fmtDate(b.expiryDate)}</td><td>{b.qtyRemaining}</td>
                   <td><input type="number" min={0} max={b.qtyRemaining} className={inputCls + ' !w-24'} value={qtys[b.id] ?? ''} onChange={e => setQtys(q => ({ ...q, [b.id]: parseInt(e.target.value) || 0 }))} /></td></tr>)}
               </Table>
             )}
@@ -160,12 +154,32 @@ export function PurchaseReturns({ user }: { user: SessionUser }) {
         </Card>
         <Card title="Return history">
           {db.purchaseReturns.length === 0 ? <Empty text="No purchase returns yet." /> : (
-            <Table head={['Return', 'Supplier', 'When', 'Value', 'Reason']}>
-              {[...db.purchaseReturns].reverse().map(r => <tr key={r.id}><td>{r.returnNo}</td><td>{db.suppliers.find(s => s.id === r.supplierId)?.name}</td><td>{fmtDateTime(r.dateTime)}</td><td className="font-semibold">{money(r.totalPaisa)}</td><td>{r.reason}</td></tr>)}
+            <Table head={['Return', 'Supplier', 'When', 'Value', 'Reason', '']}>
+              {[...db.purchaseReturns].reverse().map(r => <tr key={r.id}><td className="font-semibold">{r.returnNo}</td><td>{db.suppliers.find(s => s.id === r.supplierId)?.name}</td><td>{fmtDateTime(r.dateTime)}</td><td className="font-semibold">{money(r.totalPaisa)}</td><td>{r.reason}</td>
+                <td><Btn kind="soft" onClick={() => setDetailId(r.id)}>View</Btn></td></tr>)}
             </Table>
           )}
         </Card>
       </div>
+      {detailId !== null && (() => {
+        const r = db.purchaseReturns.find(x => x.id === detailId)!;
+        const items = db.purchaseReturnItems.filter(i => i.returnId === r.id);
+        const posted = db.ledger.find(l => l.partyType === 'supplier' && l.partyId === r.supplierId && l.reference === r.returnNo);
+        return (
+          <Modal title={`Purchase return ${r.returnNo}`} onClose={() => setDetailId(null)} wide>
+            <div className="text-sm space-y-1 mb-3">
+              <div>Supplier: <b>{db.suppliers.find(s2 => s2.id === r.supplierId)?.name}</b> · {fmtDateTime(r.dateTime)} · Recorded by {db.users.find(u => u.id === r.userId)?.fullName}</div>
+              <div>Reason: {r.reason}</div>
+              <div className="rounded-lg bg-teal-50 dark:bg-teal-900/20 border border-teal-200 dark:border-teal-800 px-3 py-2">
+                Supplier payable reduced by <b>{money(r.totalPaisa)}</b> — posted to the Supplier Ledger as a <b>debit</b> “purchase return” with reference <b>{r.returnNo}</b>{posted ? ` (ledger entry ${posted.id})` : ''}. Open <b>Supplier Ledger → {db.suppliers.find(s2 => s2.id === r.supplierId)?.name}</b> to see it; if we owed less than this amount, the extra appears as supplier credit.
+              </div>
+            </div>
+            <Table head={['Medicine', 'Batch', 'Qty returned', 'Batch cost', 'Value']}>
+              {items.map(i => { const b = db.batches.find(x => x.id === i.batchId); return <tr key={i.id}><td>{engine.medicine(i.medicineId).name}</td><td>{b?.batchNo ?? '—'}</td><td>{i.qty}</td><td>{money(b?.costPaisa ?? i.costPaisa)}</td><td className="font-semibold">{money(i.costPaisa * i.qty)}</td></tr>; })}
+            </Table>
+            <div className="text-right font-bold mt-2">Total: {money(r.totalPaisa)}</div>
+          </Modal>);
+      })()}
     </Page>
   );
 }

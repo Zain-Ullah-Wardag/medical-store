@@ -72,7 +72,13 @@ export interface PurchaseReturnItem { id: number; returnId: number; medicineId: 
 export interface CustomerPayment { id: number; customerId: number; date: string; amountPaisa: number; method: string; reference: string; userId: number; saleId: number | null; }
 export interface LedgerEntry { id: number; partyType: 'customer' | 'supplier'; partyId: number; dateTime: string; type: string; reference: string; debitPaisa: number; creditPaisa: number; }
 
-export interface Expense { id: number; date: string; category: string; description: string; amountPaisa: number; method: string; reference: string; userId: number; }
+export interface Expense {
+  id: number; date: string; category: string; description: string; amountPaisa: number; method: string; reference: string; userId: number;
+  /** Set when the expense is reversed. The original record is NEVER deleted;
+   *  reports exclude reversed expenses and the reversal has its own cash
+   *  movement (expense_reversal) + audit entry (expense.reverse). */
+  reversedAt?: string; reversedBy?: number; reversalReason?: string;
+}
 export interface CashSession { id: number; date: string; openingPaisa: number; countedPaisa: number | null; expectedPaisa: number | null; closedAt: string | null; closedBy: number | null; notes: string; discrepancyReason: string; }
 export interface CashMovement { id: number; dateTime: string; type: string; amountPaisa: number; reference: string; }
 export interface InventoryMovement { id: number; dateTime: string; medicineId: number; batchId: number; type: string; qty: number; reference: string; reason: string; userId: number; costPaisa: number; }
@@ -84,6 +90,7 @@ export interface Settings {
   nextSaleReturnSeq: number; nextPurchaseReturnSeq: number; receiptFooter: string;
   paymentMethods: string[]; expenseCategories: string[]; printerName: string;
   backupRetention: number; allowCashierReturns: boolean; allowCashierCredit: boolean; setupDone: boolean;
+  /** ISO timestamp of the last successful backup (daily reminder at cash closing). */ lastBackupAt?: string;
   scanner: ScannerSettings;
 }
 

@@ -56,7 +56,7 @@ export function Btn({ children, onClick, kind = 'primary', type = 'button', disa
     ghost: 'border border-slate-300 dark:border-slate-600 hover:bg-slate-50 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200',
     danger: 'bg-red-600 hover:bg-red-700 text-white',
   };
-  return <button type={type} disabled={disabled} onClick={onClick} className={`px-3.5 py-2 rounded-lg text-sm font-semibold disabled:opacity-50 transition ${kinds[kind]} ${className}`}>{children}</button>;
+  return <button type={type} disabled={disabled} onClick={onClick} className={`px-3.5 py-2 rounded-lg text-sm font-semibold disabled:opacity-50 disabled:cursor-not-allowed active:scale-[0.97] focus:outline-none focus:ring-2 focus:ring-teal-500 focus:ring-offset-1 dark:focus:ring-offset-slate-900 transition ${kinds[kind]} ${className}`}>{children}</button>;
 }
 
 export function Modal({ title, children, onClose, wide }: { title: string; children: React.ReactNode; onClose: () => void; wide?: boolean }) {
@@ -65,7 +65,8 @@ export function Modal({ title, children, onClose, wide }: { title: string; child
       <div className={`bg-white dark:bg-slate-800 rounded-2xl shadow-2xl w-full ${wide ? 'max-w-4xl' : 'max-w-lg'} max-h-[92vh] flex flex-col`} onClick={e => e.stopPropagation()}>
         <div className="flex items-center justify-between px-5 py-3.5 border-b border-slate-100 dark:border-slate-700">
           <h2 className="font-bold text-slate-800 dark:text-slate-100">{title}</h2>
-          <button onClick={onClose} className="text-slate-400 hover:text-slate-600 text-xl leading-none" aria-label="Close">×</button>
+          <button onClick={onClose} aria-label="Close dialog" title="Close"
+            className="w-9 h-9 shrink-0 grid place-items-center rounded-full bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-200 text-xl leading-none font-bold hover:bg-red-100 hover:text-red-600 dark:hover:bg-red-900/50 active:scale-95 focus:outline-none focus:ring-2 focus:ring-teal-500 transition">×</button>
         </div>
         <div className="p-5 overflow-y-auto">{children}</div>
       </div>
@@ -147,7 +148,37 @@ export function toCSV(rows: Record<string, string | number>[]): string {
   if (!rows.length) return '';
   const keys = Object.keys(rows[0]);
   const esc = (v: string | number) => { const s = String(v); return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
-  return [keys.join(','), ...rows.map(r => keys.map(k => esc(r[k])).join(','))].join('\n');
+  return '\ufeff' + [keys.join(','), ...rows.map(r => keys.map(k => esc(r[k])).join(','))].join('\n');
+}
+
+/** CSV export button with clear feedback: hover/pressed states come from Btn,
+ *  plus a success toast with row count and an inline ✓ flash. Disabled with an
+ *  explanatory title when there is nothing to export. */
+export function ExportBtn({ filename, rows, label = 'Export CSV', headerLine }: {
+  filename: string; rows: Record<string, string | number>[]; label?: string; headerLine?: string;
+}) {
+  const [done, setDone] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const go = () => {
+    if (!rows.length) { toast('Nothing to export for the current filters.', true); return; }
+    setBusy(true);
+    try {
+      downloadFile(filename, (headerLine ? headerLine + '\n' : '') + toCSV(rows), 'text/csv');
+      toast(`Exported ${rows.length} row${rows.length === 1 ? '' : 's'} to ${filename}${' (check your Downloads folder)'}`);
+      setDone(true); setTimeout(() => setDone(false), 2500);
+    } catch (e: any) { toast('Export failed: ' + (e?.message ?? e), true); }
+    setBusy(false);
+  };
+  return <Btn kind={done ? 'primary' : 'ghost'} disabled={busy} onClick={go}>{busy ? 'Exporting…' : done ? '✓ Exported' : `⬇ ${label}`}</Btn>;
+}
+
+/** "Name 500mg" without duplicating the strength when the name already ends with
+ *  it (e.g. a medicine typed as "Calpol 500mg" with strength "500mg"). Display
+ *  only — the stored record is never changed. */
+export function medLabel(m: { name: string; strength: string }): string {
+  const name = m.name.trim(); const st = (m.strength ?? '').trim();
+  if (!st) return name;
+  return name.toLowerCase().includes(st.toLowerCase()) ? name : `${name} ${st}`;
 }
 
 export const fmtDate = (iso: string) => iso ? new Date(iso.length <= 10 ? iso + 'T00:00:00' : iso).toLocaleDateString('en-PK', { day: '2-digit', month: 'short', year: 'numeric' }) : '—';

@@ -16,7 +16,7 @@
  * Tauri/Rust build persists exactly the same records to SQLite.
  */
 import bcrypt from 'bcryptjs';
-import { toPaisa, todayStr, nowISO, addDays, percentOf } from './money';
+import { toPaisa, todayStr, nowISO, addDays, percentOf, localDateOf } from './money';
 import * as T from './types';
 import { parseScan, gtinVariants, type ParsedScan } from './scanner';
 
@@ -56,6 +56,7 @@ export const emptyDb = (): T.DbState => ({
 export function migrateDb(db: T.DbState): T.DbState {
   if (!Array.isArray(db.medicineBarcodes)) db.medicineBarcodes = [];
   if (!db.settings.scanner) db.settings.scanner = defaultScannerSettings();
+  if (db.settings.lastBackupAt === undefined) db.settings.lastBackupAt = '';
   if ((db.version ?? 1) < 2) {
     let nextId = (db.seq['medicineBarcodes'] ?? 0);
     for (const m of db.medicines) {
@@ -116,8 +117,15 @@ export class Engine {
   }
   private cash(type: string, amountPaisa: number, reference: string) {
     if (amountPaisa === 0) return;
+    this.assertDayOpen(todayStr());
     this.db.cashMovements.push({ id: this.id('cashMovements'), dateTime: nowISO(), type, amountPaisa, reference });
     this.ensureSession(todayStr());
+  }
+  /** A closed cash day is a sealed snapshot: no new cash movements may land in
+   *  it. Corrections require the audited reopen workflow (reopenDay). */
+  assertDayOpen(date: string) {
+    const s = this.db.cashSessions.find(x => x.date === date);
+    if (s?.closedAt) throw new AppError(`Cash day ${date} is already closed (expected was recorded and counted). New cash transactions cannot be added to a closed day. An administrator can reopen it from Cash Management — the reopening and its reason are written to the audit log.`);
   }
   private move(actor: T.SessionUser, medicineId: number, batchId: number, type: string, qty: number, reference: string, reason: string, costPaisa: number) {
     this.db.movements.push({ id: this.id('movements'), dateTime: nowISO(), medicineId, batchId, type, qty, reference, reason, userId: actor.id, costPaisa });
@@ -203,10 +211,13 @@ export class Engine {
     });
   }
   changeOwnPassword(actor: T.SessionUser, oldPw: string, newPw: string) {
+    if (!oldPw) throw new AppError('Enter your current password.');
+    if (!newPw) throw new AppError('Enter a new password.');
+    if (newPw.length < 6) throw new AppError('New password must be at least 6 characters.');
+    if (newPw === oldPw) throw new AppError('New password must be different from the current password.');
     return this.tx(() => {
       const u = this.db.users.find(x => x.id === actor.id); if (!u) throw new AppError('User not found.');
       if (!bcrypt.compareSync(oldPw, u.passwordHash)) throw new AppError('Current password is incorrect.');
-      if (newPw.length < 6) throw new AppError('New password must be at least 6 characters.');
       u.passwordHash = bcrypt.hashSync(newPw, 10); this.log(actor, 'user.password', 'Changed own password');
     });
   }
@@ -393,19 +404,24 @@ export class Engine {
       return { ...res, status: 'blocked', message: `${med.name}: the scanned pack itself is EXPIRED (GS1 expiry ${g.expiryDate}). It must not be sold.` };
     }
     if (g?.batchNo) {
+      // The code identifies a SPECIFIC physical pack. Any mismatch between the
+      // code and stock records must BLOCK the scan — never warn-and-continue
+      // and never silently allocate a different batch (SCANNER-GS1-01).
       const batch = this.db.batches.find(b => b.medicineId === med!.id && b.batchNo.toLowerCase() === g.batchNo!.toLowerCase() && b.status !== 'written_off');
       if (!batch) {
-        warnings.push(`Batch ${g.batchNo} from the code is not in stock records — FEFO allocation will be used. Receive it via Purchases if it is new stock.`);
-      } else if (batch.status !== 'active') {
-        return { ...res, status: 'blocked', matchedBatch: batch, message: `${med.name} batch ${batch.batchNo} is ${batch.status.replace('_', ' ')} and must not be sold.` };
-      } else if (this.isExpired(batch)) {
-        return { ...res, status: 'blocked', matchedBatch: batch, message: `${med.name} batch ${batch.batchNo} expired on ${batch.expiryDate} and must not be sold.` };
-      } else {
-        res.matchedBatch = batch;
-        if (g.expiryDate && g.expiryDate !== batch.expiryDate)
-          warnings.push(`Code expiry ${g.expiryDate} differs from recorded batch expiry ${batch.expiryDate} — verify the pack.`);
-        if (batch.qtyRemaining <= 0) warnings.push(`Batch ${batch.batchNo} has no recorded stock left; checkout will re-check and may reject.`);
+        return { ...res, status: 'blocked', message: `${med.name}: batch "${g.batchNo}" from this code is NOT in stock records. The scan was rejected — do not sell from another batch against this code. Receive the batch via Purchases (or correct the batch number) and scan again.` };
       }
+      if (batch.status !== 'active') {
+        return { ...res, status: 'blocked', matchedBatch: batch, message: `${med.name} batch ${batch.batchNo} is ${batch.status.replace('_', ' ')} and must not be sold.` };
+      }
+      if (this.isExpired(batch)) {
+        return { ...res, status: 'blocked', matchedBatch: batch, message: `${med.name} batch ${batch.batchNo} expired on ${batch.expiryDate} and must not be sold.` };
+      }
+      if (g.expiryDate && g.expiryDate !== batch.expiryDate) {
+        return { ...res, status: 'blocked', matchedBatch: batch, message: `${med.name}: EXPIRY MISMATCH — the code says batch ${batch.batchNo} expires ${g.expiryDate}, but stock records say ${batch.expiryDate}. The scan was rejected. Verify the physical pack and correct the batch record (Inventory) before selling.` };
+      }
+      res.matchedBatch = batch;
+      if (batch.qtyRemaining <= 0) warnings.push(`Batch ${batch.batchNo} has no recorded stock left; checkout will re-check and may reject.`);
     }
     return res;
   }
@@ -720,17 +736,57 @@ export class Engine {
       return p;
     });
   }
-  supplierPayment(actor: T.SessionUser, input: { supplierId: number; amountPaisa: number; method: string; reference: string; date: string }) {
+  supplierPayment(actor: T.SessionUser, input: { supplierId: number; amountPaisa: number; method: string; reference: string; date: string; allowAdvance?: boolean }) {
     this.require(actor, 'payments.create');
-    if (input.amountPaisa <= 0) throw new AppError('Payment amount must be positive.');
+    if (!Number.isInteger(input.amountPaisa) || input.amountPaisa <= 0) throw new AppError('Payment amount must be a positive amount.');
+    const outstanding = this.supplierBalance(input.supplierId);
+    const excess = input.amountPaisa - Math.max(0, outstanding);
+    if (excess > 0 && !input.allowAdvance)
+      throw new AppError(`Payment exceeds the outstanding payable by ${excess} paisa (outstanding: ${Math.max(0, outstanding)}). Reduce the amount, or confirm it as a supplier ADVANCE (the excess will show as supplier credit).`);
     return this.tx(() => {
       const p: T.SupplierPayment = { id: this.id('supplierPayments'), supplierId: input.supplierId, date: input.date || todayStr(), amountPaisa: input.amountPaisa, method: input.method, reference: input.reference || '', userId: actor.id, purchaseId: null };
       this.db.supplierPayments.push(p);
       this.ledger('supplier', input.supplierId, 'payment', input.reference || `SPAY-${p.id}`, input.amountPaisa, 0);
       if (input.method.toLowerCase() === 'cash') this.cash('supplier_payment', -input.amountPaisa, `SPAY-${p.id}`);
+      if (excess > 0) this.log(actor, 'supplier.advance', `Supplier ${input.supplierId}: advance portion ${excess} paisa recorded as supplier credit`);
       this.log(actor, 'supplier.payment', `Supplier ${input.supplierId} paid ${input.amountPaisa}`);
       return p;
     });
+  }
+  /**
+   * Audited balance correction. Opening balances and history are NEVER edited;
+   * instead a signed ledger adjustment is recorded with a reason.
+   * deltaPaisa > 0 increases what is owed (customer owes more / we owe supplier more).
+   */
+  adjustPartyBalance(actor: T.SessionUser, partyType: 'customer' | 'supplier', partyId: number, deltaPaisa: number, reason: string) {
+    this.require(actor, 'ledgers.adjust');
+    if (!Number.isInteger(deltaPaisa) || deltaPaisa === 0) throw new AppError('Adjustment amount must be non-zero.');
+    if (!reason.trim()) throw new AppError('A reason is required for a balance adjustment.');
+    return this.tx(() => {
+      const exists = partyType === 'customer' ? this.db.customers.some(c => c.id === partyId) : this.db.suppliers.some(x => x.id === partyId);
+      if (!exists) throw new AppError('Party not found.');
+      if (partyType === 'customer') this.ledger('customer', partyId, 'adjustment', reason.trim(), Math.max(0, deltaPaisa), Math.max(0, -deltaPaisa));
+      else this.ledger('supplier', partyId, 'adjustment', reason.trim(), Math.max(0, -deltaPaisa), Math.max(0, deltaPaisa));
+      this.log(actor, 'ledger.adjust', `${partyType} ${partyId} adjusted by ${deltaPaisa} paisa: ${reason.trim()}`);
+    });
+  }
+  /** Role-enforced sales listing (Sales History). Cashiers see ONLY their own
+   *  sales — enforced here in the engine, not just hidden in the UI. */
+  listSales(actor: T.SessionUser, f: { from: string; to: string; query?: string; cashierId?: number | null; method?: string }): T.Sale[] {
+    if (actor.role !== 'cashier') this.require(actor, 'sales.view'); else this.require(actor, 'sales.view.own');
+    const q = (f.query ?? '').trim().toLowerCase();
+    return this.db.sales.filter(s2 => {
+      const d = localDateOf(s2.dateTime);
+      if (d < f.from || d > f.to) return false;
+      if (actor.role === 'cashier' && s2.userId !== actor.id) return false;
+      if (f.cashierId && s2.userId !== f.cashierId) return false;
+      if (f.method && !this.db.salePayments.some(p2 => p2.saleId === s2.id && p2.method === f.method)) return false;
+      if (q && !s2.invoiceNo.toLowerCase().includes(q) && !(this.db.customers.find(c => c.id === s2.customerId)?.name ?? '').toLowerCase().includes(q)) return false;
+      return true;
+    }).sort((a, b) => b.id - a.id);
+  }
+  markBackupDone(actor: T.SessionUser) {
+    return this.tx(() => { this.db.settings.lastBackupAt = nowISO(); this.log(actor, 'backup.create', 'Backup file created'); });
   }
   partyLedger(partyType: 'customer' | 'supplier', partyId: number) {
     const party = partyType === 'customer' ? this.db.customers.find(c => c.id === partyId) : this.db.suppliers.find(s => s.id === partyId);
@@ -752,15 +808,22 @@ export class Engine {
       return e;
     });
   }
-  deleteExpense(actor: T.SessionUser, id: number) {
-    this.require(actor, 'expenses.delete');
+  /** Reverses an expense WITHOUT deleting it: the original stays visible,
+   *  flagged reversed, reports exclude it, and (for cash) a reversing cash
+   *  movement restores the drawer. Audited as expense.reverse. */
+  reverseExpense(actor: T.SessionUser, id: number, reason: string) {
+    this.require(actor, 'expenses.reverse');
+    if (!reason.trim()) throw new AppError('A reason is required to reverse an expense.');
     return this.tx(() => {
       const e = this.db.expenses.find(x => x.id === id); if (!e) throw new AppError('Expense not found.');
+      if (e.reversedAt) throw new AppError('This expense has already been reversed.');
       if (e.method.toLowerCase() === 'cash') this.cash('expense_reversal', e.amountPaisa, `EXP-${e.id}`);
-      this.db.expenses = this.db.expenses.filter(x => x.id !== id);
-      this.log(actor, 'expense.delete', `EXP-${id} reversed`);
+      e.reversedAt = nowISO(); e.reversedBy = actor.id; e.reversalReason = reason.trim();
+      this.log(actor, 'expense.reverse', `EXP-${id} reversed (${e.category} ${e.amountPaisa} paisa): ${reason.trim()}`);
     });
   }
+  /** @deprecated kept for compatibility — expenses are reversed, never deleted. */
+  deleteExpense(actor: T.SessionUser, id: number) { return this.reverseExpense(actor, id, 'Reversed by user'); }
   cashAdjustment(actor: T.SessionUser, amountPaisa: number, reason: string) {
     this.require(actor, 'cash.adjust');
     if (amountPaisa === 0 || !reason.trim()) throw new AppError('Amount and reason are required for cash in/out.');
@@ -768,24 +831,24 @@ export class Engine {
   }
   setOpeningCash(actor: T.SessionUser, date: string, openingPaisa: number) {
     this.require(actor, 'cash.view');
-    return this.tx(() => { const s = this.ensureSession(date); if (s.closedAt) throw new AppError('Session already closed.'); s.openingPaisa = openingPaisa; });
+    return this.tx(() => { const s = this.ensureSession(date); if (s.closedAt) throw new AppError(`Cash day ${date} is already closed. Opening cash cannot be changed — an administrator must reopen the day first (Cash Management).`); s.openingPaisa = openingPaisa; });
   }
   expectedCash(date: string): number {
     const s = this.db.cashSessions.find(x => x.date === date);
-    const moves = this.db.cashMovements.filter(m => m.dateTime.slice(0, 10) === date).reduce((x, m) => x + m.amountPaisa, 0);
+    const moves = this.db.cashMovements.filter(m => localDateOf(m.dateTime) === date).reduce((x, m) => x + m.amountPaisa, 0);
     return (s?.openingPaisa ?? 0) + moves;
   }
   dayCashSummary(date: string) {
-    const moves = this.db.cashMovements.filter(m => m.dateTime.slice(0, 10) === date);
+    const moves = this.db.cashMovements.filter(m => localDateOf(m.dateTime) === date);
     const by = (t: string) => moves.filter(m => m.type === t).reduce((s, m) => s + m.amountPaisa, 0);
-    const daySales = this.db.sales.filter(s => s.dateTime.slice(0, 10) === date);
+    const daySales = this.db.sales.filter(s => localDateOf(s.dateTime) === date);
     const pays = this.db.salePayments.filter(p => daySales.some(s => s.id === p.saleId));
     return {
       totalSalesPaisa: daySales.reduce((s, x) => s + x.totalPaisa, 0),
       cashSalesPaisa: pays.filter(p => p.method.toLowerCase() === 'cash').reduce((s, p) => s + p.amountPaisa, 0),
       nonCashSalesPaisa: pays.filter(p => p.method.toLowerCase() !== 'cash').reduce((s, p) => s + p.amountPaisa, 0),
       customerPaymentsPaisa: by('customer_payment'), refundsPaisa: -by('refund'),
-      expensesPaisa: -by('expense') - (-by('expense_reversal') > 0 ? by('expense_reversal') : 0),
+      expensesPaisa: 0 - (by('expense') + by('expense_reversal')), // net of reversals (avoids -0)
       supplierPaymentsPaisa: -by('supplier_payment'), cashInPaisa: by('cash_in'), cashOutPaisa: -by('cash_out'),
       expectedPaisa: this.expectedCash(date),
     };
@@ -803,9 +866,21 @@ export class Engine {
     });
   }
 
+  reopenDay(actor: T.SessionUser, date: string, reason: string) {
+    this.require(actor, 'cash.reopen');
+    if (!reason.trim()) throw new AppError('A reason is required to reopen a closed cash day.');
+    return this.tx(() => {
+      const s = this.db.cashSessions.find(x => x.date === date);
+      if (!s?.closedAt) throw new AppError(`Cash day ${date} is not closed.`);
+      this.log(actor, 'cash.reopen', `${date} REOPENED — previous snapshot: expected ${s.expectedPaisa}, counted ${s.countedPaisa}, discrepancy reason "${s.discrepancyReason}". Reason for reopening: ${reason}`);
+      s.closedAt = null; s.closedBy = null; s.countedPaisa = null; s.expectedPaisa = null; s.discrepancyReason = '';
+      return s;
+    });
+  }
+
   // ---------- financial aggregates ----------
   rangeStats(from: string, to: string) {
-    const inRange = (iso: string) => { const d = iso.slice(0, 10); return d >= from && d <= to; };
+    const inRange = (iso: string) => { const d = localDateOf(iso); return d >= from && d <= to; };
     const sales = this.db.sales.filter(s => inRange(s.dateTime));
     const saleIds = new Set(sales.map(s => s.id));
     const items = this.db.saleItems.filter(i => saleIds.has(i.saleId));
@@ -815,15 +890,48 @@ export class Engine {
     const retItems = this.db.salesReturnItems.filter(i => retIds.has(i.returnId));
     const returnsValue = rets.reduce((s, r) => s + r.refundPaisa, 0);
     const cogsGross = items.reduce((s, i) => s + i.allocations.reduce((a, al) => a + al.qty * al.costPaisa, 0), 0);
-    const cogsReversed = retItems.reduce((s, i) => s + i.costReversedPaisa, 0);
+    // Only goods that returned to SALEABLE stock reverse COGS. Damaged or
+    // quarantined returns are not saleable inventory — their cost remains a
+    // cost of the period (shrinkage), so gross profit is not overstated.
+    const cogsReversed = retItems.filter(i => i.disposition === 'saleable').reduce((s, i) => s + i.costReversedPaisa, 0);
     const netRevenue = grossRevenue - returnsValue;
     const cogs = cogsGross - cogsReversed;
-    const expenses = this.db.expenses.filter(e => e.date >= from && e.date <= to).reduce((s, e) => s + e.amountPaisa, 0);
+    const expenses = this.db.expenses.filter(e => !e.reversedAt && e.date >= from && e.date <= to).reduce((s, e) => s + e.amountPaisa, 0);
     const purchases = this.db.purchases.filter(p => p.date >= from && p.date <= to).reduce((s, p) => s + p.totalPaisa, 0);
     return {
       invoiceCount: sales.length, grossRevenue, returnsValue, netRevenue, cogs,
       grossProfit: netRevenue - cogs, expenses, netOperatingProfit: netRevenue - cogs - expenses, purchases,
     };
+  }
+  /**
+   * Sales grouped by medicine or category, NET of returns recorded in the same
+   * period (returns are attributed by their own date, exactly like rangeStats).
+   * qty/revenue are reduced by returned amounts; COGS is reduced only by the
+   * cost of goods returned to saleable stock (damaged/quarantined returns keep
+   * their cost). Summing COGS across rows equals rangeStats().cogs — this is
+   * the single calculation every report view must use.
+   * Note: revenue here is line revenue (excludes bill-level discount and tax).
+   */
+  salesGrouped(from: string, to: string, by: 'medicine' | 'category'): { name: string; qty: number; revenuePaisa: number; cogsPaisa: number }[] {
+    const inRange = (iso: string) => { const d = localDateOf(iso); return d >= from && d <= to; };
+    const keyOf = (medicineId: number, fallbackName: string) => by === 'medicine'
+      ? fallbackName
+      : (this.db.categories.find(c => c.id === this.db.medicines.find(m => m.id === medicineId)?.categoryId)?.name ?? 'Uncategorized');
+    const saleIds = new Set(this.db.sales.filter(s2 => inRange(s2.dateTime)).map(s2 => s2.id));
+    const map = new Map<string, { name: string; qty: number; revenuePaisa: number; cogsPaisa: number }>();
+    const bump = (name: string, qty: number, revenue: number, cogs: number) => {
+      const cur = map.get(name) ?? { name, qty: 0, revenuePaisa: 0, cogsPaisa: 0 };
+      cur.qty += qty; cur.revenuePaisa += revenue; cur.cogsPaisa += cogs; map.set(name, cur);
+    };
+    for (const i of this.db.saleItems.filter(x => saleIds.has(x.saleId)))
+      bump(keyOf(i.medicineId, i.medicineName), i.qty, i.lineTotalPaisa, i.allocations.reduce((a, al) => a + al.qty * al.costPaisa, 0));
+    const retIds = new Set(this.db.salesReturns.filter(r => inRange(r.dateTime)).map(r => r.id));
+    for (const ri of this.db.salesReturnItems.filter(x => retIds.has(x.returnId))) {
+      const item = this.db.saleItems.find(x => x.id === ri.saleItemId);
+      const name = keyOf(ri.medicineId, item?.medicineName ?? this.db.medicines.find(m => m.id === ri.medicineId)?.name ?? 'Unknown');
+      bump(name, -ri.qty, -ri.amountPaisa, ri.disposition === 'saleable' ? -ri.costReversedPaisa : 0);
+    }
+    return [...map.values()].sort((a, b) => b.revenuePaisa - a.revenuePaisa);
   }
   inventoryValuation(): number {
     const on = todayStr();
@@ -837,7 +945,7 @@ export class Engine {
     return { nearExpiry, expired, lowStock };
   }
   topSelling(from: string, to: string, limit = 10) {
-    const ids = new Set(this.db.sales.filter(s => { const d = s.dateTime.slice(0, 10); return d >= from && d <= to; }).map(s => s.id));
+    const ids = new Set(this.db.sales.filter(s => { const d = localDateOf(s.dateTime); return d >= from && d <= to; }).map(s => s.id));
     const map = new Map<number, { medicineId: number; name: string; qty: number; revenuePaisa: number }>();
     for (const i of this.db.saleItems.filter(x => ids.has(x.saleId))) {
       const cur = map.get(i.medicineId) ?? { medicineId: i.medicineId, name: i.medicineName, qty: 0, revenuePaisa: 0 };
@@ -849,7 +957,7 @@ export class Engine {
     const out: { date: string; salesPaisa: number; invoices: number }[] = [];
     for (let i = days - 1; i >= 0; i--) {
       const d = addDays(todayStr(), -i);
-      const day = this.db.sales.filter(s => s.dateTime.slice(0, 10) === d);
+      const day = this.db.sales.filter(s => localDateOf(s.dateTime) === d);
       out.push({ date: d, salesPaisa: day.reduce((s, x) => s + x.totalPaisa, 0), invoices: day.length });
     }
     return out;
@@ -859,6 +967,13 @@ export class Engine {
   updateSettings(actor: T.SessionUser, patch: Partial<T.Settings>) {
     this.require(actor, 'settings.edit');
     return this.tx(() => { Object.assign(this.db.settings, patch); this.log(actor, 'settings.update', Object.keys(patch).join(', ')); });
+  }
+  /** Startup-only: replace state from a previously persisted snapshot
+   *  (Tauri SQLite load). Runs migrations; callers must clear any session. */
+  replaceStateFromJson(json: string) {
+    const parsed = JSON.parse(json);
+    this.db = migrateDb({ ...emptyDb(), ...parsed });
+    this.save();
   }
   exportBackup(): string {
     return JSON.stringify({ app: 'MedStore Manager', schemaVersion: this.db.version, exportedAt: nowISO(), data: this.db }, null, 2);

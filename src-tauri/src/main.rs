@@ -52,10 +52,11 @@ fn migrate(conn: &Connection) -> Result<(), String> {
     )
     .map_err(|e| e.to_string())?;
     // Apply bundled relational migrations exactly once each, in version order.
-    // 001 = initial schema, 002 = multi-barcode packaging (non-destructive).
+    // 001 = initial schema, 002 = multi-barcode packaging, 003 = expense reversal (all non-destructive).
     const MIGRATIONS: &[(i64, &str)] = &[
         (1, include_str!("../../database/migrations/001_initial.sql")),
         (2, include_str!("../../database/migrations/002_barcodes.sql")),
+        (3, include_str!("../../database/migrations/003_quality_fixes.sql")),
     ];
     for (version, sql) in MIGRATIONS {
         let applied: bool = conn
@@ -165,6 +166,33 @@ fn chrono_now() -> String {
 }
 
 #[tauri::command]
+fn db_backup_auto(app: AppHandle, path: State<'_, DbPath>) -> Result<String, String> {
+    // Writes <app-data>/backups/medstore-backup-<unix>.db and returns the path.
+    // Uses the SQLite online-backup API, safe while the app is running.
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?.join("backups");
+    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let dest = dir.join(format!("medstore-backup-{}.db", chrono_now()));
+    let msg = db_backup_to_inner(&path.0, &dest.to_string_lossy())?;
+    Ok(format!("{}|{}", dest.display(), msg))
+}
+
+fn db_backup_to_inner(db_path: &PathBuf, dest: &str) -> Result<String, String> {
+    let conn = open(db_path)?;
+    let mut dest_conn = Connection::open(dest).map_err(|e| e.to_string())?;
+    let backup = rusqlite::backup::Backup::new(&conn, &mut dest_conn).map_err(|e| e.to_string())?;
+    backup
+        .run_to_completion(100, std::time::Duration::from_millis(10), None)
+        .map_err(|e| e.to_string())?;
+    let check: String = dest_conn
+        .query_row("PRAGMA integrity_check", [], |r| r.get(0))
+        .map_err(|e| e.to_string())?;
+    if check != "ok" {
+        return Err(format!("Backup integrity check failed: {check}"));
+    }
+    Ok(format!("Backup verified OK: {dest}"))
+}
+
+#[tauri::command]
 fn db_info(app: AppHandle, path: State<'_, DbPath>) -> Result<serde_json::Value, String> {
     let _ = app;
     Ok(serde_json::json!({
@@ -186,6 +214,7 @@ fn main() {
             db_load_state,
             db_save_state,
             db_backup_to,
+            db_backup_auto,
             db_restore_from,
             db_info
         ])

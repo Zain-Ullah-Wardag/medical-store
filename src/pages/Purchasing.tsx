@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { engine, uid } from '../lib/store';
-import { Page, Card, Btn, Modal, Field, inputCls, money, toast, Table, Badge, Empty, run, fmtDate, downloadFile, toCSV } from '../components/ui';
+import { Page, Card, Btn, Modal, Field, inputCls, money, toast, Table, Badge, Empty, run, fmtDate, ExportBtn, medLabel } from '../components/ui';
 import { toPaisa, todayStr } from '../core/money';
 import type { SessionUser, Supplier } from '../core/types';
 import { can } from '../core/types';
@@ -101,7 +101,7 @@ function PurchaseForm({ user, close }: { user: SessionUser; close: () => void })
         {lines.map((l, i) => (
           <div key={i} className="grid grid-cols-2 md:grid-cols-7 gap-2 border border-slate-100 dark:border-slate-700 rounded-xl p-2">
             <select className={inputCls + ' col-span-2'} value={l.medicineId} onChange={e => { const id = Number(e.target.value); const m = db.medicines.find(x => x.id === id); setLine(i, 'medicineId', id); if (m) { setLine(i, 'costRs', String(m.defaultCostPaisa / 100 || '')); setLine(i, 'sellRs', String(m.retailPricePaisa / 100 || '')); } }}>
-              <option value={0}>Select medicine…</option>{db.medicines.filter(m => m.active).map(m => <option key={m.id} value={m.id}>{m.name} {m.strength}</option>)}
+              <option value={0}>Select medicine…</option>{db.medicines.filter(m => m.active).map(m => <option key={m.id} value={m.id}>{medLabel(m)}</option>)}
             </select>
             <input className={inputCls} placeholder="Batch no *" value={l.batchNo} onChange={e => setLine(i, 'batchNo', e.target.value)} />
             <input type="date" className={inputCls} title="Expiry date" value={l.expiryDate} onChange={e => setLine(i, 'expiryDate', e.target.value)} />
@@ -130,21 +130,25 @@ export function Suppliers({ user, goLedger }: { user: SessionUser; goLedger: (su
   const db = engine.db;
   const [form, setForm] = useState<Supplier | 'new' | null>(null);
   const [payFor, setPayFor] = useState<Supplier | null>(null);
+  const [q, setQ] = useState(''); const [detail, setDetail] = useState<Supplier | null>(null);
   const canEdit = can(user.role, 'suppliers.edit');
+  const rows = db.suppliers.filter(s2 => { const t = q.trim().toLowerCase(); return !t || s2.name.toLowerCase().includes(t) || s2.phone.includes(t) || s2.contactPerson.toLowerCase().includes(t) || s2.address.toLowerCase().includes(t); });
   return (
     <Page title="Suppliers" sub="Distributors and their outstanding balances."
       actions={<>
-        <Btn kind="ghost" onClick={() => downloadFile('suppliers.csv', toCSV(db.suppliers.map(s => ({ Name: s.name, Phone: s.phone, BalancePKR: engine.supplierBalance(s.id) / 100 }))), 'text/csv')}>Export CSV</Btn>
+        <ExportBtn filename="suppliers.csv" headerLine={`${db.settings.storeName} — Suppliers — ${new Date().toLocaleString('en-PK')}`} rows={rows.map(s2 => ({ Name: s2.name, Contact: s2.contactPerson, Phone: s2.phone, Address: s2.address, BalancePKR: engine.supplierBalance(s2.id) / 100, Meaning: engine.supplierBalance(s2.id) > 0 ? 'We owe them' : engine.supplierBalance(s2.id) < 0 ? 'Advance (supplier credit)' : 'Clear' }))} />
         {canEdit && <Btn onClick={() => setForm('new')}>+ Add supplier</Btn>}
       </>}>
       <Card>
-        {db.suppliers.length === 0 ? <Empty text="No suppliers yet." /> : (
+        <input className={inputCls + ' mb-3'} placeholder="🔎 Search by name, phone, contact person or address…" value={q} onChange={e => setQ(e.target.value)} />
+        {rows.length === 0 ? <Empty text={q ? 'No supplier matches your search.' : 'No suppliers yet.'} /> : (
           <Table head={['Supplier', 'Contact', 'Phone', 'We owe them', 'Actions']}>
-            {db.suppliers.map(s => { const bal = engine.supplierBalance(s.id); return <tr key={s.id}>
+            {rows.map(s => { const bal = engine.supplierBalance(s.id); return <tr key={s.id}>
               <td><b>{s.name}</b><span className="block text-xs text-slate-400">{s.address}</span></td><td>{s.contactPerson || '—'}</td><td>{s.phone || '—'}</td>
               <td>{bal > 0 ? <Badge color="amber">{money(bal)}</Badge> : bal < 0 ? <Badge color="blue">Advance {money(-bal)}</Badge> : <Badge color="green">Clear</Badge>}</td>
               <td><div className="flex gap-1.5 whitespace-nowrap">
-                <Btn kind="soft" onClick={() => goLedger(s.id)}>Ledger</Btn>
+                <Btn kind="soft" onClick={() => setDetail(s)}>Details</Btn>
+                <Btn kind="ghost" onClick={() => goLedger(s.id)}>Ledger</Btn>
                 {can(user.role, 'payments.create') && <Btn kind="ghost" onClick={() => setPayFor(s)}>Pay</Btn>}
                 {canEdit && <Btn kind="ghost" onClick={() => setForm(s)}>Edit</Btn>}</div></td></tr>; })}
           </Table>
@@ -152,7 +156,38 @@ export function Suppliers({ user, goLedger }: { user: SessionUser; goLedger: (su
       </Card>
       {form && <SupplierForm user={user} sup={form === 'new' ? undefined : form} close={() => setForm(null)} />}
       {payFor && <PaySupplierForm user={user} sup={payFor} close={() => setPayFor(null)} />}
+      {detail && <SupplierDetail sup={detail} goLedger={goLedger} close={() => setDetail(null)} />}
     </Page>
+  );
+}
+
+function SupplierDetail({ sup, goLedger, close }: { sup: Supplier; goLedger: (id: number) => void; close: () => void }) {
+  const db = engine.db;
+  const bal = engine.supplierBalance(sup.id);
+  const purchases = db.purchases.filter(p => p.supplierId === sup.id).slice().reverse().slice(0, 10);
+  const payments = db.supplierPayments.filter(p => p.supplierId === sup.id).slice().reverse().slice(0, 10);
+  const returns = db.purchaseReturns.filter(r => r.supplierId === sup.id).slice().reverse().slice(0, 10);
+  return (
+    <Modal title={sup.name} onClose={close} wide>
+      <div className="grid sm:grid-cols-2 gap-2 text-sm mb-4">
+        <div><span className="text-slate-400">Contact person:</span> {sup.contactPerson || '—'}</div><div><span className="text-slate-400">Phone:</span> {sup.phone || '—'}</div>
+        <div className="sm:col-span-2"><span className="text-slate-400">Address:</span> {sup.address || '—'}</div>
+        {sup.notes && <div className="sm:col-span-2"><span className="text-slate-400">Notes / terms:</span> {sup.notes}</div>}
+        <div><span className="text-slate-400">Opening balance:</span> {money(sup.openingBalancePaisa)}</div>
+        <div><span className="text-slate-400">Current balance:</span> {bal > 0 ? <Badge color="amber">We owe {money(bal)}</Badge> : bal < 0 ? <Badge color="blue">Advance {money(-bal)}</Badge> : <Badge color="green">Clear</Badge>}</div>
+      </div>
+      <h4 className="font-bold text-sm mb-1.5">Recent purchases (Purchases → View shows full bills)</h4>
+      {purchases.length === 0 ? <Empty text="No purchases from this supplier." /> : (
+        <Table head={['Reference', 'Date', 'Net', 'Paid', 'Due']}>{purchases.map(p => <tr key={p.id}><td className="font-semibold">{p.supplierInvoiceNo || ("Purchase #" + p.id)}</td><td>{fmtDate(p.date)}</td><td>{money(p.totalPaisa)}</td><td>{money(p.paidPaisa + db.supplierPayments.filter(x => x.purchaseId === p.id).reduce((a, x) => a + x.amountPaisa, 0))}</td><td>{money(Math.max(0, p.totalPaisa - p.paidPaisa - db.supplierPayments.filter(x => x.purchaseId === p.id).reduce((a, x) => a + x.amountPaisa, 0)))}</td></tr>)}</Table>)}
+      <div className="grid md:grid-cols-2 gap-3 mt-4">
+        <div><h4 className="font-bold text-sm mb-1.5">Recent payments</h4>{payments.length === 0 ? <Empty text="None." /> : (
+          <Table head={['Date', 'Amount', 'Method', 'Ref']}>{payments.map(p => <tr key={p.id}><td>{fmtDate(p.date)}</td><td>{money(p.amountPaisa)}</td><td>{p.method}</td><td>{p.reference || '—'}</td></tr>)}</Table>)}</div>
+        <div><h4 className="font-bold text-sm mb-1.5">Purchase returns</h4>{returns.length === 0 ? <Empty text="None." /> : (
+          <Table head={['Return', 'Value', 'Reason']}>{returns.map(r => <tr key={r.id}><td>{r.returnNo}</td><td>{money(r.totalPaisa)}</td><td>{r.reason}</td></tr>)}</Table>)}</div>
+      </div>
+      <div className="flex justify-end gap-2 mt-5"><Btn kind="ghost" onClick={close}>Close</Btn>
+        <Btn kind="soft" onClick={() => { goLedger(sup.id); close(); }}>Open supplier ledger</Btn></div>
+    </Modal>
   );
 }
 
@@ -180,17 +215,30 @@ function SupplierForm({ user, sup, close }: { user: SessionUser; sup?: Supplier;
 function PaySupplierForm({ user, sup, close }: { user: SessionUser; sup: Supplier; close: () => void }) {
   const db = engine.db;
   const [amountRs, setAmountRs] = useState(''); const [method, setMethod] = useState('Cash'); const [ref, setRef] = useState(''); const [date, setDate] = useState(todayStr());
+  const [confirmAdvance, setConfirmAdvance] = useState(false);
+  const outstanding = engine.supplierBalance(sup.id);
+  const amtPaisa = toPaisa(amountRs || 0);
+  const amountError = amountRs === '' ? 'Amount is required.' : amtPaisa <= 0 ? 'Amount must be greater than zero.' : '';
+  const excess = amtPaisa - Math.max(0, outstanding);
+  const needsConfirm = !amountError && excess > 0;
   return (
     <Modal title={`Pay supplier — ${sup.name}`} onClose={close}>
-      <p className="text-sm mb-3">Outstanding: <b>{money(engine.supplierBalance(sup.id))}</b></p>
+      <p className="text-sm mb-3">{outstanding > 0 ? <>Outstanding payable: <b>{money(outstanding)}</b></> : outstanding < 0 ? <>Supplier already owes us / holds an advance of <b>{money(-outstanding)}</b>.</> : 'No outstanding payable — any payment creates a supplier advance.'}</p>
       <div className="grid grid-cols-2 gap-3">
-        <Field label="Amount (Rs) *"><input type="number" className={inputCls} value={amountRs} onChange={e => setAmountRs(e.target.value)} /></Field>
+        <Field label="Amount to pay (Rs) *"><input type="number" className={inputCls} value={amountRs} onChange={e => { setAmountRs(e.target.value); setConfirmAdvance(false); }} /></Field>
         <Field label="Method"><select className={inputCls} value={method} onChange={e => setMethod(e.target.value)}>{db.settings.paymentMethods.map(m => <option key={m}>{m}</option>)}</select></Field>
         <Field label="Date"><input type="date" className={inputCls} value={date} onChange={e => setDate(e.target.value)} /></Field>
         <Field label="Reference"><input className={inputCls} value={ref} onChange={e => setRef(e.target.value)} placeholder="Cheque / txn no." /></Field>
       </div>
+      {amountRs !== '' && amountError && <p className="text-sm text-red-500 mt-2">{amountError}</p>}
+      {needsConfirm && (
+        <label className="flex gap-2 items-start rounded-lg bg-amber-50 dark:bg-amber-900/20 border border-amber-300 dark:border-amber-700 px-3 py-2 text-sm text-amber-800 dark:text-amber-100 mt-3 cursor-pointer">
+          <input type="checkbox" className="mt-0.5" checked={confirmAdvance} onChange={e => setConfirmAdvance(e.target.checked)} />
+          <span>⚠ This is <b>{money(excess)}</b> more than the outstanding payable. Tick to confirm the extra is an intentional <b>supplier advance</b> (shows as supplier credit on the ledger).</span>
+        </label>
+      )}
       <div className="flex justify-end gap-2 mt-5"><Btn kind="ghost" onClick={close}>Cancel</Btn>
-        <Btn onClick={() => { if (run(() => engine.supplierPayment(user, { supplierId: sup.id, amountPaisa: toPaisa(amountRs || 0), method, reference: ref, date }), 'Payment recorded.')) close(); }}>Record payment</Btn></div>
+        <Btn disabled={!!amountError || (needsConfirm && !confirmAdvance)} onClick={() => { if (run(() => engine.supplierPayment(user, { supplierId: sup.id, amountPaisa: amtPaisa, method, reference: ref, date, allowAdvance: confirmAdvance }), 'Payment recorded.')) close(); }}>Record payment</Btn></div>
     </Modal>
   );
 }

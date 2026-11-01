@@ -41,7 +41,16 @@ const NAV: { key: PageKey; label: string; icon: string; perm: string }[] = [
 export default function App() {
   useDbVersion();
   const db = engine.db;
-  const [user, setUser] = useState<SessionUser | null>(() => loadSession());
+  const [user, setUserRaw] = useState<SessionUser | null>(() => {
+    // A stored session is only honoured if that account still exists and is
+    // active in the CURRENT database (protects against stale sessions after a
+    // restore or a first-run state migration).
+    const s = loadSession();
+    if (s && engine.db.users.some(u => u.id === s.id && u.username === s.username && u.active)) return s;
+    if (s) saveSession(null);
+    return null;
+  });
+  const setUser = setUserRaw;
   const [page, setPage] = useState<PageKey>('dashboard');
   const [ledgerParty, setLedgerParty] = useState<number | undefined>(undefined);
   const [dark, setDark] = useState(() => localStorage.getItem('medstore-dark') === '1');
@@ -93,7 +102,7 @@ export default function App() {
   return (
     <div className="h-screen flex bg-slate-50 dark:bg-slate-900 overflow-hidden">
       {/* Sidebar — fixed, own scroll */}
-      <aside className={`${mobileNav ? 'fixed inset-y-0 left-0 z-40' : 'hidden'} md:flex md:static w-64 shrink-0 bg-teal-800 dark:bg-slate-950 text-white flex-col`}>
+      <aside className={`${mobileNav ? 'fixed inset-y-0 left-0 z-40' : 'hidden'} md:flex md:static w-64 shrink-0 bg-teal-800 dark:bg-slate-950 text-white flex-col no-print`}>
         <div className="px-4 py-4 border-b border-white/10">
           <div className="text-lg font-extrabold leading-tight">⚕ MedStore Manager</div>
           <div className="text-xs text-teal-100/70 truncate">{db.settings.storeName}</div>
@@ -126,7 +135,7 @@ export default function App() {
           <button onClick={doLogout} className="text-sm font-semibold text-red-500 hover:text-red-600">Logout</button>
         </header>
         {/* Only content scrolls */}
-        <main className="flex-1 overflow-y-auto">{content}</main>
+        <main className="app-main flex-1 overflow-y-auto">{content}</main>
       </div>
       <ToastHost />
     </div>

@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react';
 import { engine } from '../lib/store';
-import { Page, Card, Btn, Modal, Field, inputCls, money, toast, Table, Badge, Empty, run, Confirm, fmtDate } from '../components/ui';
+import { Page, Card, Btn, Modal, Field, inputCls, money, toast, Table, Badge, Empty, run, Confirm, fmtDate, medLabel } from '../components/ui';
 import { toPaisa, todayStr, addDays, daysBetween } from '../core/money';
 import type { Batch, Medicine, MedicineBarcode, PackagingLevel, SessionUser } from '../core/types';
 import { can } from '../core/types';
@@ -53,7 +53,7 @@ function MedicineForm({ user, med, close }: { user: SessionUser; med?: Medicine;
         <label className="flex items-center gap-2 text-sm pt-5"><input type="checkbox" checked={f.active} onChange={e => set('active', e.target.checked)} /> Active (can be sold)</label>
       </div>
       {similar.length > 0 && <div className="mt-3 rounded-lg bg-amber-50 dark:bg-amber-900/30 border border-amber-200 dark:border-amber-800 px-3 py-2 text-sm text-amber-800 dark:text-amber-200">
-        ⚠ Possible duplicate: {similar.map(m => `${m.name} ${m.strength}`).join(', ')}. Different strength/pack size = separate product; only continue if this is genuinely different.</div>}
+        ⚠ Possible duplicate: {similar.map(m => medLabel(m)).join(', ')}. Different strength/pack size = separate product; only continue if this is genuinely different.</div>}
       <div className="flex justify-end gap-2 mt-5"><Btn kind="ghost" onClick={close}>Cancel</Btn><Btn onClick={save}>Save medicine</Btn></div>
     </Modal>
   );
@@ -108,7 +108,7 @@ export function Medicines({ user }: { user: SessionUser }) {
             {rows.map(m => {
               const st = engine.saleableStock(m.id);
               return <tr key={m.id}>
-                <td><b>{m.name} {m.strength}</b><span className="block text-xs text-slate-400">{m.genericName} · {m.dosageForm} · {m.packSize}{m.prescription !== 'OTC' ? ` · ${m.prescription}` : ''}</span></td>
+                <td><b>{medLabel(m)}</b><span className="block text-xs text-slate-400">{m.genericName} · {m.dosageForm} · {m.packSize}{m.prescription !== 'OTC' ? ` · ${m.prescription}` : ''}</span></td>
                 <td className="font-mono text-xs">{m.barcode || '—'}{(() => { const n = engine.barcodesFor(m.id).filter(b => b.active).length; return n > 1 ? <span className="block text-teal-600 font-sans font-semibold">+{n - 1} packaging barcode{n > 2 ? 's' : ''}</span> : null; })()}</td>
                 <td>{db.categories.find(c => c.id === m.categoryId)?.name ?? '—'}</td>
                 <td>{st <= m.minStock ? <Badge color="amber">{st} (low)</Badge> : <Badge color="green">{st}</Badge>}</td>
@@ -127,8 +127,11 @@ export function Medicines({ user }: { user: SessionUser }) {
       {form && <MedicineForm user={user} med={form === 'new' ? undefined : form} close={() => setForm(null)} />}
       {stockFor && <OpeningBatchForm user={user} med={stockFor} close={() => setStockFor(null)} />}
       {detail && (
-        <Modal title={`${detail.name} ${detail.strength}`} onClose={() => setDetail(null)} wide>
+        <Modal title={medLabel(detail)} onClose={() => setDetail(null)} wide>
           <MedicineDetail med={detail} user={user} />
+          <div className="flex justify-end gap-2 mt-5 sticky bottom-0 bg-white dark:bg-slate-800 pt-3 border-t border-slate-100 dark:border-slate-700">
+            <Btn onClick={() => setDetail(null)}>Close</Btn>
+          </div>
         </Modal>
       )}
     </Page>
@@ -240,7 +243,7 @@ export function Inventory({ user }: { user: SessionUser }) {
         {view === 'low' ? (
           lowMeds.length === 0 ? <Empty text="No low-stock medicines. 🎉" /> : (
             <Table head={['Medicine', 'Saleable stock', 'Minimum', 'Suggested action']}>
-              {lowMeds.map(m => <tr key={m.id}><td><b>{m.name} {m.strength}</b></td><td><Badge color="amber">{engine.saleableStock(m.id)}</Badge></td><td>{m.minStock}</td><td>Reorder from supplier</td></tr>)}
+              {lowMeds.map(m => <tr key={m.id}><td><b>{medLabel(m)}</b></td><td><Badge color="amber">{engine.saleableStock(m.id)}</Badge></td><td>{m.minStock}</td><td>Reorder from supplier</td></tr>)}
             </Table>)
         ) : (
           <>
@@ -250,7 +253,7 @@ export function Inventory({ user }: { user: SessionUser }) {
                 {[...batches].sort((a, b) => a.expiryDate.localeCompare(b.expiryDate)).map(b => {
                   const m = engine.medicine(b.medicineId); const days = daysBetween(on, b.expiryDate);
                   return <tr key={b.id}>
-                    <td><b>{m.name} {m.strength}</b></td><td>{b.batchNo}</td>
+                    <td><b>{medLabel(m)}</b></td><td>{b.batchNo}</td>
                     <td>{fmtDate(b.expiryDate)} <span className="text-xs text-slate-400">({days < 0 ? `${-days}d ago` : `${days}d left`})</span></td>
                     <td className="font-semibold">{b.qtyRemaining}</td><td>{money(b.costPaisa)}</td><td>{money(b.qtyRemaining * b.costPaisa)}</td>
                     <td><BatchStatusBadge b={b} /></td>

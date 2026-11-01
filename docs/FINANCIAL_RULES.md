@@ -56,3 +56,28 @@ tests in `src/core/engine.test.ts`.
 Buy 100 × Rs 60 = Rs 6,000 of stock. Sell 10 × Rs 100. Rent Rs 100.
 → Net revenue 1,000 · COGS 600 · Gross profit 400 · Net operating profit 300.
 Purchases (6,000) appear in their own column and are **not** part of profit.
+
+
+## Clarified rules (QA stabilization phase)
+
+- **Business day = local calendar day.** Transaction timestamps are stored in UTC, but every day-level filter,
+  dashboard figure, report and cash closing uses the LOCAL date. A sale at 2:00 AM PKT belongs to that local day.
+- **Returns and COGS.** Both sealed and damaged returns reduce net sales (by the RETURN's date). COGS is reversed
+  only when the returned goods go back to SALEABLE stock ("Sealed & good"). Damaged/quarantined returns do not
+  re-enter inventory value, so their batch cost remains a cost of the period (this avoids overstating profit).
+  The profit summary, by-medicine and by-category views all share this one calculation and must always reconcile.
+- **Closed cash days are sealed.** After daily closing, no cash movement (sale payment, refund, expense,
+  cash-in/out, opening-cash change) can be added to that date. The expected/counted snapshot never changes.
+  An administrator may reopen a day with a reason; the reopening and the previous snapshot are audit-logged.
+- **Supplier payments.** Paying more than the outstanding payable requires explicitly confirming an advance;
+  the excess becomes supplier credit (negative balance) and is consumed by future purchases. Zero/negative
+  payments are always rejected.
+- **Customer payments & advances.** Zero/negative payments are rejected. Paying more than the outstanding udhaar
+  is allowed and recorded as a customer advance (a liability), never as sales income. Advances should belong to
+  a named customer, not the shared "Walk-in Customer" record.
+- **Expense reversal.** Expenses are never deleted. Reversal flags the record with a reason, restores cash if it
+  was cash-paid, excludes it from reports, and writes an `expense.reverse` audit entry.
+- **Opening balances are immutable.** Corrections use an audited ledger adjustment (reason required); history is
+  preserved and the adjustment appears on the party statement.
+- **Inventory valuation** consistently means saleable stock at batch cost (active, non-expired batches only) —
+  in the valuation report, dashboard and slow-moving report alike.

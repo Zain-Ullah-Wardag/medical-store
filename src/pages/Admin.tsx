@@ -1,9 +1,9 @@
 import { useRef, useState } from 'react';
-import { engine } from '../lib/store';
+import { engine, isTauri, backupSqliteFile, databaseInfo } from '../lib/store';
 import { defaultScannerSettings, type ScanResolution } from '../core/engine';
 import { parseScan } from '../core/scanner';
 import { beepSuccess, beepError } from '../lib/beep';
-import { Page, Card, Btn, Modal, Field, inputCls, Table, Badge, Empty, run, toast, fmtDateTime, downloadFile, toCSV, Confirm } from '../components/ui';
+import { Page, Card, Btn, Modal, Field, inputCls, Table, Badge, Empty, run, toast, fmtDateTime, ExportBtn, downloadFile, Confirm, medLabel } from '../components/ui';
 import { todayStr } from '../core/money';
 import type { Role, SessionUser, Settings, ScannerSettings } from '../core/types';
 import { PERMISSIONS } from '../core/types';
@@ -64,7 +64,7 @@ export function AuditLogs() {
   const rows = [...db.audit].reverse().filter(a => !q || (a.action + a.details + a.username).toLowerCase().includes(q.toLowerCase())).slice(0, 300);
   return (
     <Page title="Audit Logs" sub="Every important action — sales, returns, stock adjustments, payments, logins — with user and time."
-      actions={<Btn kind="ghost" onClick={() => downloadFile('audit-log.csv', toCSV(rows.map(a => ({ When: a.dateTime, User: a.username, Action: a.action, Details: a.details }))), 'text/csv')}>Export CSV</Btn>}>
+      actions={<ExportBtn filename="audit-log.csv" headerLine={`${engine.db.settings.storeName} — Audit logs — generated ${new Date().toLocaleString('en-PK')}`} rows={rows.map(a => ({ When: a.dateTime, User: a.username, Action: a.action, Details: a.details }))} />}>
       <Card>
         <input className={inputCls + ' mb-3'} placeholder="Filter by user, action or details…" value={q} onChange={e => setQ(e.target.value)} />
         {rows.length === 0 ? <Empty text="No audit entries." /> : (
@@ -82,7 +82,25 @@ export function Backup({ user }: { user: SessionUser }) {
   const [pending, setPending] = useState<string | null>(null);
   const [validation, setValidation] = useState<string>('');
   const [issues, setIssues] = useState<string[] | null>(null);
-  const doBackup = () => { downloadFile(`medstore-backup-${todayStr()}-${Date.now() % 100000}.json`, engine.exportBackup(), 'application/json'); toast('Backup file downloaded. Save a copy on a USB drive too.'); };
+  const [sqliteBusy, setSqliteBusy] = useState(false); const [sqlitePath, setSqlitePath] = useState('');
+  const [dbInfo, setDbInfo] = useState<{ databasePath: string; sqliteVersion: string } | null>(null);
+  const lastBackup = engine.db.settings.lastBackupAt;
+  const doBackup = () => {
+    downloadFile(`medstore-backup-${todayStr()}-${Date.now() % 100000}.json`, engine.exportBackup(), 'application/json');
+    run(() => engine.markBackupDone(user));
+    toast('Backup (JSON) downloaded. Save a copy on a USB drive too.');
+  };
+  const doSqliteBackup = async () => {
+    setSqliteBusy(true);
+    try {
+      const res = await backupSqliteFile();
+      const [path, msg] = res.split('|');
+      setSqlitePath(path);
+      run(() => engine.markBackupDone(user));
+      toast(`SQLite .db backup saved — ${msg || path}`);
+    } catch (e: any) { toast('SQLite backup failed: ' + (e?.message ?? e), true); }
+    setSqliteBusy(false);
+  };
   const onFile = async (f: File) => {
     const text = await f.text();
     const v = engine.validateBackup(text);
@@ -93,8 +111,17 @@ export function Backup({ user }: { user: SessionUser }) {
     <Page title="Backup & Restore" sub="Backups contain your ENTIRE store database. Keep copies on a USB drive outside this computer.">
       <div className="grid md:grid-cols-2 gap-4 items-start">
         <Card title="💾 Create backup">
-          <p className="text-sm text-slate-500 mb-3">Downloads one backup file (JSON export of the database; in the Windows build the same button also produces a SQLite <code>.db</code> copy). Recommended: back up at daily closing.</p>
-          <Btn onClick={doBackup}>Download backup now</Btn>
+          <p className="text-sm text-slate-500 mb-3">Two backup forms, both restorable: a portable <b>JSON export</b> (restore from this page) and, in the Windows app, a verified <b>SQLite .db</b> copy. Recommended: back up at daily closing and keep a copy on USB.</p>
+          <p className="text-sm mb-3">Last backup: {lastBackup ? <b>{new Date(lastBackup).toLocaleString('en-PK')}</b> : <b className="text-red-500">none recorded — back up now</b>}</p>
+          <div className="flex flex-wrap gap-2">
+            <Btn onClick={doBackup}>⬇ Download JSON backup</Btn>
+            {isTauri
+              ? <Btn kind="soft" disabled={sqliteBusy} onClick={doSqliteBackup}>{sqliteBusy ? 'Creating .db…' : '💾 Create SQLite .db backup'}</Btn>
+              : <Btn kind="ghost" disabled>💾 SQLite .db backup (Windows app only)</Btn>}
+            {isTauri && <Btn kind="ghost" onClick={async () => setDbInfo(await databaseInfo())}>Show database location</Btn>}
+          </div>
+          {sqlitePath && <p className="text-xs text-teal-600 mt-2 break-all">Saved to: {sqlitePath}<br />Copy this file to a USB drive for safekeeping.</p>}
+          {dbInfo && <p className="text-xs text-slate-400 mt-2 break-all">Live database: {dbInfo.databasePath} · SQLite {dbInfo.sqliteVersion}</p>}
           <p className="text-xs text-slate-400 mt-3">Retention setting: keep last {engine.db.settings.backupRetention} backups (configure in Settings). Automatic daily prompt: at cash closing, if no backup was made today.</p>
         </Card>
         <Card title="♻ Restore from backup">
@@ -129,7 +156,13 @@ export function Backup({ user }: { user: SessionUser }) {
 function ScannerTest() {
   const [value, setValue] = useState('');
   const [result, setResult] = useState<ScanResolution | null>(null);
-  const SAMPLE = '(01)08964001234500(17)271231(10)PN-2401(21)SN001';
+  // Build the GS1 demo from the ACTUAL recorded batch expiry (a code whose
+  // batch/expiry disagrees with stock records is correctly BLOCKED now).
+  const demoBatch = engine.db.batches.find(b => b.status === 'active' && engine.db.medicineBarcodes.some(mb => mb.medicineId === b.medicineId && mb.barcode === '8964001234500'))
+    ?? engine.db.batches.find(b => b.batchNo === 'PN-2401');
+  const SAMPLE = demoBatch
+    ? `(01)08964001234500(17)${demoBatch.expiryDate.slice(2, 4)}${demoBatch.expiryDate.slice(5, 7)}${demoBatch.expiryDate.slice(8, 10)}(10)${demoBatch.batchNo}(21)SN001`
+    : '(01)08964001234500(17)271231(10)PN-2401(21)SN001';
   const test = (raw: string) => {
     if (!raw.trim()) return;
     const r = engine.resolveScan(raw);
@@ -151,15 +184,16 @@ function ScannerTest() {
           <div><b>Result:</b> {result.status.toUpperCase()} — {result.message}</div>
           <div><b>Format:</b> {p.format} · <b>Lookup code:</b> <span className="font-mono">{p.code || '—'}</span> · <b>Check digit:</b> {p.checkDigitValid === null ? 'n/a' : p.checkDigitValid ? 'valid ✓' : 'INVALID ⚠'}</div>
           {p.gs1 && <div><b>GS1:</b> GTIN {p.gs1.gtin ?? '—'} · Batch {p.gs1.batchNo ?? '—'} · Expiry {p.gs1.expiryDate ?? '—'} · Serial {p.gs1.serial ?? '—'}</div>}
-          {result.status === 'found' && <div><b>Would add:</b> {result.baseQtyPerScan} base unit(s) · <b>Packaging:</b> {result.packagingLabel} · <b>Batch:</b> {result.matchedBatch ? `${result.matchedBatch.batchNo} (exp ${result.matchedBatch.expiryDate})` : 'FEFO fallback'}</div>}
+          {result.status === 'found' && <div><b>Would add:</b> {result.baseQtyPerScan} base unit(s) · <b>Packaging:</b> {result.packagingLabel} · <b>Batch:</b> {result.matchedBatch ? `${result.matchedBatch.batchNo} (exp ${result.matchedBatch.expiryDate})` : 'FEFO (no batch in code)'}</div>}
           {result.warnings.map((w, i) => <div key={i}>⚠ {w}</div>)}
         </div>
       )}
-      <div className="flex gap-3 mt-1.5">
-        <button className="text-xs text-teal-600 font-semibold" onClick={() => test(SAMPLE)}>Run sample GS1 test</button>
-        <span className="text-[11px] text-slate-400 font-mono self-center">{SAMPLE}</span>
-        <button className="text-xs text-slate-400" onClick={() => { const parsed = parseScan(SAMPLE); toast(`Parsed kind=${parsed.kind}, GTIN=${parsed.gs1?.gtin}`); }}>Parser only</button>
+      <div className="flex flex-wrap items-center gap-2 mt-3">
+        <Btn kind="soft" onClick={() => test(SAMPLE)}>▶ Run sample GS1 test</Btn>
+        <Btn kind="ghost" onClick={() => { const parsed = parseScan(SAMPLE); toast(`Parsed kind=${parsed.kind}, GTIN=${parsed.gs1?.gtin}`); }}>Parser only</Btn>
+        <span className="text-[11px] text-slate-400 font-mono break-all">{SAMPLE}</span>
       </div>
+      <p className="text-[11px] text-slate-400 mt-1.5">The sample is generated from your actual recorded batch{demoBatch ? ` ${demoBatch.batchNo} (expiry ${demoBatch.expiryDate})` : ''}. A GS1 code whose batch or expiry disagrees with stock records is <b>blocked</b> — the app never substitutes another batch.</p>
     </div>
   );
 }
@@ -231,17 +265,18 @@ export function SettingsPage({ user, dark, setDark }: { user: SessionUser; dark:
           {engine.db.medicineBarcodes.length === 0 ? <Empty text="No barcodes registered yet." /> : (
             <Table head={['Medicine', 'Barcode', 'Packaging', 'Units/pkg', 'Primary', 'Active']}>
               {engine.db.medicineBarcodes.map(r => { const m = engine.db.medicines.find(x => x.id === r.medicineId); return <tr key={r.id} className={r.active ? '' : 'opacity-50'}>
-                <td>{m ? `${m.name} ${m.strength}` : '—'}</td><td className="font-mono text-xs">{r.barcode}</td><td>{r.packagingLevel}</td><td>{r.unitsPerPackage}</td>
+                <td>{m ? medLabel(m) : '—'}</td><td className="font-mono text-xs">{r.barcode}</td><td>{r.packagingLevel}</td><td>{r.unitsPerPackage}</td>
                 <td>{r.isPrimary ? <Badge color="blue">primary</Badge> : '—'}</td><td>{r.active ? <Badge color="green">On</Badge> : <Badge>Off</Badge>}</td></tr>; })}
             </Table>
           )}
         </Card>
         <Card title="Change my password">
           <div className="grid grid-cols-2 gap-3">
-            <Field label="Current password"><input type="password" className={inputCls} value={pw.old} onChange={e => setPw({ ...pw, old: e.target.value })} /></Field>
-            <Field label="New password"><input type="password" className={inputCls} value={pw.next} onChange={e => setPw({ ...pw, next: e.target.value })} /></Field>
+            <Field label="Current password *"><input type="password" className={inputCls} value={pw.old} onChange={e => setPw({ ...pw, old: e.target.value })} /></Field>
+            <Field label="New password * (min 6 characters)"><input type="password" className={inputCls} value={pw.next} onChange={e => setPw({ ...pw, next: e.target.value })} /></Field>
           </div>
-          <Btn className="mt-3" kind="soft" onClick={() => { if (run(() => engine.changeOwnPassword(user, pw.old, pw.next), 'Password changed.')) setPw({ old: '', next: '' }); }}>Change password</Btn>
+          {(!pw.old || pw.next.length < 6) && (pw.old || pw.next) && <p className="text-sm text-red-500 mt-2">{!pw.old ? 'Enter your current password.' : pw.next.length < 6 ? 'New password must be at least 6 characters.' : ''}</p>}
+          <Btn className="mt-3" kind="soft" disabled={!pw.old || !pw.next} onClick={() => { if (run(() => engine.changeOwnPassword(user, pw.old, pw.next), 'Password changed.')) setPw({ old: '', next: '' }); }}>Change password</Btn>
         </Card>
         <Card title="⚠ Danger zone">
           <p className="text-sm text-slate-500 mb-3">Clear all business data (medicines, sales, purchases…) but keep user accounts. Take a backup first — this cannot be undone.</p>

@@ -110,12 +110,19 @@ describe('GS1 batch & expiry identification', () => {
     expect(eng.db.batches.find(b => b.batchNo === 'PN-LATE')!.qtyRemaining).toBe(95);
     expect(eng.db.batches.find(b => b.batchNo === 'PN-EARLY')!.qtyRemaining).toBe(100);
   });
-  it('falls back to FEFO (with a warning) when the GS1 batch is not in stock records', () => {
+  it('BLOCKS when the GS1 batch is not in stock records (never silently FEFO)', () => {
     medWithBatches();
     const r = eng.resolveScan(`01${GTIN14}10UNKNOWN-LOT${GS}21SN1`);
-    expect(r.status).toBe('found');
+    expect(r.status).toBe('blocked');
     expect(r.matchedBatch).toBeUndefined();
-    expect(r.warnings.some(w => /not in stock records/.test(w))).toBe(true);
+    expect(r.message).toMatch(/NOT in stock records/);
+  });
+  it('BLOCKS on GS1 expiry mismatch vs the recorded batch (SCANNER-GS1-01)', () => {
+    medWithBatches(); // PN-EARLY expires today+60; code claims 2027-12-31
+    const r = eng.resolveScan(`(01)${GTIN14}(17)271231(10)PN-EARLY`);
+    expect(r.status).toBe('blocked');
+    expect(r.message).toMatch(/EXPIRY MISMATCH/);
+    expect(r.message).toMatch(/2027-12-31/);
   });
   it('blocks a scan whose own GS1 expiry date has passed', () => {
     medWithBatches();
@@ -214,7 +221,9 @@ describe('seeded sample catalog scanning', () => {
     expect(boxScan.status).toBe('found');
     expect(boxScan.baseQtyPerScan).toBe(10);
     expect(boxScan.unitPricePaisa).toBe(toPaisa(35)); // Rs 350 box / 10 strips
-    const gs1 = e2.resolveScan('(01)08964001234500(17)271231(10)PN-2401(21)SN001');
+    const pn = e2.db.batches.find(b => b.batchNo === 'PN-2401')!;
+    const yymmdd = pn.expiryDate.slice(2, 4) + pn.expiryDate.slice(5, 7) + pn.expiryDate.slice(8, 10);
+    const gs1 = e2.resolveScan(`(01)08964001234500(17)${yymmdd}(10)PN-2401(21)SN001`);
     expect(gs1.status).toBe('found');
     expect(gs1.matchedBatch?.batchNo).toBe('PN-2401');
     expect(gs1.parsed.gs1?.serial).toBe('SN001');

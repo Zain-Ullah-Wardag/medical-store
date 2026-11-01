@@ -9,14 +9,19 @@ body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
 *::-webkit-scrollbar { width: 8px; height: 8px; }
 *::-webkit-scrollbar-thumb { background: rgba(100,116,139,.4); border-radius: 8px; }
 
-/* Print: show ONLY the receipt (80mm thermal friendly) when one exists */
 @media print {
-  body * { visibility: hidden; }
-  .receipt, .receipt * { visibility: visible; }
+  /* --- Receipt printing: ONLY when a receipt is on screen, print just it (80mm). --- */
+  body:has(.receipt) * { visibility: hidden; }
+  body:has(.receipt) .receipt, body:has(.receipt) .receipt * { visibility: visible; }
   .receipt {
     position: absolute; left: 0; top: 0; width: 80mm !important;
     border: none !important; margin: 0 !important;
   }
+  /* --- Document printing (reports, ledgers): full content, no app chrome. --- */
   .no-print { display: none !important; }
-  @page { margin: 4mm; }
+  html, body, #root { height: auto !important; overflow: visible !important; }
+  .app-main { overflow: visible !important; height: auto !important; }
+  /* avoid clipping wide tables */
+  .app-main .overflow-x-auto { overflow: visible !important; }
+  @page { margin: 10mm; }
 }
