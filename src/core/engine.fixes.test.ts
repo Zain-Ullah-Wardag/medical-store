@@ -261,3 +261,25 @@ describe('POS price permissions (Priority 2)', () => {
     expect(sellAt(admin, med.id, toPaisa(33), ov.id).totalPaisa).toBe(toPaisa(33));
   });
 });
+
+describe('cashier dashboard scoping (Priority 3)', () => {
+  it('engine aggregates for a cashier include ONLY their own sales', () => {
+    const med = stockedMed();
+    const sell = (actor: SessionUser, qty: number, key: string) => eng.createSale(actor, { customerId: walkIn(), billDiscountPaisa: 0, idempotencyKey: key, items: [{ medicineId: med.id, qty, unitPricePaisa: toPaisa(35), discountPaisa: 0 }], payments: [{ method: 'Cash', amountPaisa: toPaisa(35 * qty) }] });
+    sell(cashier, 2, 'ds-1'); sell(admin, 3, 'ds-2');
+    const mine = eng.rangeStats(todayStr(), todayStr(), cashier);
+    expect(mine.invoiceCount).toBe(1);
+    expect(mine.netRevenue).toBe(toPaisa(70));
+    expect(mine.purchases).toBe(0); // business totals not exposed in scoped view
+    const all = eng.rangeStats(todayStr(), todayStr(), admin);
+    expect(all.invoiceCount).toBe(2);
+    expect(all.netRevenue).toBe(toPaisa(175));
+    // unscoped call (Reports page, already permission-gated) unchanged
+    expect(eng.rangeStats(todayStr(), todayStr()).netRevenue).toBe(toPaisa(175));
+    expect(eng.recentSales(cashier).every(s => s.userId === cashier.id)).toBe(true);
+    expect(eng.recentSales(cashier).length).toBe(1);
+    expect(eng.salesTrend(1, cashier)[0].salesPaisa).toBe(toPaisa(70));
+    expect(eng.topSelling(todayStr(), todayStr(), 5, cashier)[0].qty).toBe(2);
+    expect(eng.topSelling(todayStr(), todayStr(), 5, admin)[0].qty).toBe(5);
+  });
+});

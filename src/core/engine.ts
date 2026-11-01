@@ -949,13 +949,26 @@ export class Engine {
   }
 
   // ---------- financial aggregates ----------
-  rangeStats(from: string, to: string) {
+  /** Sales-visibility scope: users without 'sales.view' (cashiers, who hold
+   *  'sales.view.own') only ever aggregate their OWN sales. Returns the
+   *  userId to restrict to, or undefined for business-wide visibility. */
+  private salesScopeId(actor?: T.SessionUser): number | undefined {
+    return actor && !T.can(actor.role, 'sales.view') ? actor.id : undefined;
+  }
+  /** Most recent sales visible to this actor (cashier: own only). */
+  recentSales(actor: T.SessionUser, limit = 5): T.Sale[] {
+    const scope = this.salesScopeId(actor);
+    return this.db.sales.filter(s => scope === undefined || s.userId === scope)
+      .sort((a, b) => b.id - a.id).slice(0, limit);
+  }
+  rangeStats(from: string, to: string, actor?: T.SessionUser) {
+    const scope = this.salesScopeId(actor);
     const inRange = (iso: string) => { const d = localDateOf(iso); return d >= from && d <= to; };
-    const sales = this.db.sales.filter(s => inRange(s.dateTime));
+    const sales = this.db.sales.filter(s => inRange(s.dateTime) && (scope === undefined || s.userId === scope));
     const saleIds = new Set(sales.map(s => s.id));
     const items = this.db.saleItems.filter(i => saleIds.has(i.saleId));
     const grossRevenue = sales.reduce((s, x) => s + x.totalPaisa, 0);
-    const rets = this.db.salesReturns.filter(r => inRange(r.dateTime));
+    const rets = this.db.salesReturns.filter(r => inRange(r.dateTime) && (scope === undefined || this.db.sales.find(x => x.id === r.saleId)?.userId === scope));
     const retIds = new Set(rets.map(r => r.id));
     const retItems = this.db.salesReturnItems.filter(i => retIds.has(i.returnId));
     const returnsValue = rets.reduce((s, r) => s + r.refundPaisa, 0);
@@ -966,8 +979,9 @@ export class Engine {
     const cogsReversed = retItems.filter(i => i.disposition === 'saleable').reduce((s, i) => s + i.costReversedPaisa, 0);
     const netRevenue = grossRevenue - returnsValue;
     const cogs = cogsGross - cogsReversed;
-    const expenses = this.db.expenses.filter(e => !e.reversedAt && e.date >= from && e.date <= to).reduce((s, e) => s + e.amountPaisa, 0);
-    const purchases = this.db.purchases.filter(p => p.date >= from && p.date <= to).reduce((s, p) => s + p.totalPaisa, 0);
+    // Business-wide expense/purchase totals are not part of a scoped view.
+    const expenses = scope === undefined ? this.db.expenses.filter(e => !e.reversedAt && e.date >= from && e.date <= to).reduce((s, e) => s + e.amountPaisa, 0) : 0;
+    const purchases = scope === undefined ? this.db.purchases.filter(p => p.date >= from && p.date <= to).reduce((s, p) => s + p.totalPaisa, 0) : 0;
     return {
       invoiceCount: sales.length, grossRevenue, returnsValue, netRevenue, cogs,
       grossProfit: netRevenue - cogs, expenses, netOperatingProfit: netRevenue - cogs - expenses, purchases,
@@ -1014,8 +1028,9 @@ export class Engine {
     const lowStock = this.db.medicines.filter(m => m.active && this.saleableStock(m.id) <= m.minStock);
     return { nearExpiry, expired, lowStock };
   }
-  topSelling(from: string, to: string, limit = 10) {
-    const ids = new Set(this.db.sales.filter(s => { const d = localDateOf(s.dateTime); return d >= from && d <= to; }).map(s => s.id));
+  topSelling(from: string, to: string, limit = 10, actor?: T.SessionUser) {
+    const scope = this.salesScopeId(actor);
+    const ids = new Set(this.db.sales.filter(s => { const d = localDateOf(s.dateTime); return d >= from && d <= to && (scope === undefined || s.userId === scope); }).map(s => s.id));
     const map = new Map<number, { medicineId: number; name: string; qty: number; revenuePaisa: number }>();
     for (const i of this.db.saleItems.filter(x => ids.has(x.saleId))) {
       const cur = map.get(i.medicineId) ?? { medicineId: i.medicineId, name: i.medicineName, qty: 0, revenuePaisa: 0 };
@@ -1023,11 +1038,12 @@ export class Engine {
     }
     return [...map.values()].sort((a, b) => b.qty - a.qty).slice(0, limit);
   }
-  salesTrend(days: number) {
+  salesTrend(days: number, actor?: T.SessionUser) {
+    const scope = this.salesScopeId(actor);
     const out: { date: string; salesPaisa: number; invoices: number }[] = [];
     for (let i = days - 1; i >= 0; i--) {
       const d = addDays(todayStr(), -i);
-      const day = this.db.sales.filter(s => localDateOf(s.dateTime) === d);
+      const day = this.db.sales.filter(s => localDateOf(s.dateTime) === d && (scope === undefined || s.userId === scope));
       out.push({ date: d, salesPaisa: day.reduce((s, x) => s + x.totalPaisa, 0), invoices: day.length });
     }
     return out;
