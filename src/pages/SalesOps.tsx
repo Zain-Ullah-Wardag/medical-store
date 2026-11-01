@@ -127,7 +127,18 @@ export function PurchaseReturns({ user }: { user: SessionUser }) {
   const [detailId, setDetailId] = useState<number | null>(null);
   const [supplierId, setSupplierId] = useState(String(db.suppliers[0]?.id ?? ''));
   const [qtys, setQtys] = useState<Record<number, number>>({}); const [reason, setReason] = useState('');
-  const batches = db.batches.filter(b => b.supplierId === Number(supplierId) && b.qtyRemaining > 0);
+  const batches = db.batches.filter(b => b.supplierId === Number(supplierId) && b.qtyRemaining > 0)
+    .sort((a, b2) => engine.medicine(a.medicineId).name.localeCompare(engine.medicine(b2.medicineId).name) || a.expiryDate.localeCompare(b2.expiryDate));
+  const qtyError = (batchId: number, max: number): string => {
+    const q = qtys[batchId];
+    if (q === undefined) return '';
+    if (!Number.isFinite(q) || q < 0) return 'Enter a valid quantity (0 or more).';
+    if (q > max) return `Only ${max} eligible to return.`;
+    return '';
+  };
+  const hasQtyError = batches.some(b => qtyError(b.id, b.qtyRemaining));
+  const selected = batches.filter(b => (qtys[b.id] ?? 0) > 0);
+  const returnTotal = selected.reduce((sum, b) => sum + (qtys[b.id] ?? 0) * b.costPaisa, 0);
   const submit = () => {
     const ok = run(() => engine.createPurchaseReturn(user, {
       supplierId: Number(supplierId), purchaseId: null, reason,
@@ -143,14 +154,58 @@ export function PurchaseReturns({ user }: { user: SessionUser }) {
             {db.suppliers.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}</select></Field>
           <div className="mt-3">
             {batches.length === 0 ? <Empty text="No batches with stock for this supplier." /> : (
-              <Table head={['Medicine · batch', 'Expiry', 'On hand', 'Return qty']}>
-                {batches.map(b => <tr key={b.id}><td className="min-w-[230px]"><div className="font-semibold leading-snug">{medLabel(engine.medicine(b.medicineId))}</div><div className="text-xs text-slate-400">Batch {b.batchNo}{engine.isExpired(b) && <> · <Badge color="red">expired</Badge></>}</div></td><td className="whitespace-nowrap">{fmtDate(b.expiryDate)}</td><td>{b.qtyRemaining}</td>
-                  <td><input type="number" min={0} max={b.qtyRemaining} className={inputCls + ' !w-24'} value={qtys[b.id] ?? ''} onChange={e => setQtys(q => ({ ...q, [b.id]: parseInt(e.target.value) || 0 }))} /></td></tr>)}
-              </Table>
+              <>
+              <p className="text-xs text-slate-400 mb-2">Tip: the medicine column (left) and Return qty column (right) stay visible while you scroll sideways.</p>
+              {/* Dedicated sticky-column table: medicine name frozen left, Return Qty frozen
+                  right, middle columns scroll. Scrolling is contained in this box so the
+                  page itself never scrolls horizontally. */}
+              <div className="overflow-auto max-h-[520px] border border-slate-200 dark:border-slate-700 rounded-xl">
+                <table className="w-full min-w-[660px] text-sm border-separate border-spacing-0">
+                  <thead>
+                    <tr className="text-left text-[11px] uppercase tracking-wide text-slate-400">
+                      <th className="sticky top-0 left-0 z-30 bg-slate-50 dark:bg-slate-800 py-2 px-3 font-semibold border-b border-r border-slate-200 dark:border-slate-700 w-[240px] min-w-[240px] max-w-[240px]">Medicine · batch</th>
+                      <th className="sticky top-0 z-20 bg-slate-50 dark:bg-slate-800 py-2 px-3 font-semibold border-b border-slate-200 dark:border-slate-700 whitespace-nowrap">Expiry</th>
+                      <th className="sticky top-0 z-20 bg-slate-50 dark:bg-slate-800 py-2 px-3 font-semibold border-b border-slate-200 dark:border-slate-700 whitespace-nowrap">Eligible qty</th>
+                      <th className="sticky top-0 z-20 bg-slate-50 dark:bg-slate-800 py-2 px-3 font-semibold border-b border-slate-200 dark:border-slate-700 whitespace-nowrap">Unit cost</th>
+                      <th className="sticky top-0 z-20 bg-slate-50 dark:bg-slate-800 py-2 px-3 font-semibold border-b border-slate-200 dark:border-slate-700 whitespace-nowrap">Return value</th>
+                      <th className="sticky top-0 right-0 z-30 bg-slate-50 dark:bg-slate-800 py-2 px-3 font-semibold border-b border-l border-slate-200 dark:border-slate-700 shadow-[-10px_0_10px_-10px_rgba(0,0,0,0.35)] w-[150px] min-w-[150px]">Return qty</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {batches.map(b => { const err = qtyError(b.id, b.qtyRemaining); const q = qtys[b.id] ?? 0; return (
+                      <tr key={b.id} className="group">
+                        <td className="sticky left-0 z-10 bg-white dark:bg-slate-800 group-hover:bg-slate-50 dark:group-hover:bg-slate-700/40 py-2 px-3 align-top border-b border-r border-slate-100 dark:border-slate-700 w-[240px] min-w-[240px] max-w-[240px]">
+                          <div className="font-semibold leading-snug truncate" title={medLabel(engine.medicine(b.medicineId))}>{medLabel(engine.medicine(b.medicineId))}</div>
+                          <div className="text-xs text-slate-400 truncate" title={`Batch ${b.batchNo}`}>Batch {b.batchNo}{engine.isExpired(b) && <> · <Badge color="red">expired</Badge></>}</div>
+                        </td>
+                        <td className="py-2 px-3 align-top border-b border-slate-100 dark:border-slate-700 whitespace-nowrap">{fmtDate(b.expiryDate)}</td>
+                        <td className="py-2 px-3 align-top border-b border-slate-100 dark:border-slate-700">{b.qtyRemaining}</td>
+                        <td className="py-2 px-3 align-top border-b border-slate-100 dark:border-slate-700 whitespace-nowrap">{money(b.costPaisa)}</td>
+                        <td className="py-2 px-3 align-top border-b border-slate-100 dark:border-slate-700 whitespace-nowrap font-semibold">{q > 0 ? money(q * b.costPaisa) : '—'}</td>
+                        <td className="sticky right-0 z-10 bg-white dark:bg-slate-800 group-hover:bg-slate-50 dark:group-hover:bg-slate-700/40 py-2 px-3 align-top border-b border-l border-slate-200 dark:border-slate-700 shadow-[-10px_0_10px_-10px_rgba(0,0,0,0.35)] w-[150px] min-w-[150px]">
+                          <input type="number" min={0} max={b.qtyRemaining} step={1} inputMode="numeric" aria-label={`Return quantity for ${medLabel(engine.medicine(b.medicineId))} batch ${b.batchNo}`}
+                            className={inputCls + ' !w-[110px] text-center' + (err ? ' !border-red-500' : '')}
+                            value={qtys[b.id] ?? 0}
+                            onFocus={e => e.target.select()}
+                            onWheel={e => (e.target as HTMLInputElement).blur()}
+                            onChange={e => { const v = e.target.value === '' ? 0 : parseInt(e.target.value, 10); setQtys(prev => ({ ...prev, [b.id]: Number.isNaN(v) ? -1 : v })); }}
+                            onBlur={() => setQtys(prev => { const v = prev[b.id] ?? 0; return { ...prev, [b.id]: Math.max(0, Math.min(b.qtyRemaining, Number.isFinite(v) ? v : 0)) }; })} />
+                          {err && <div className="text-[11px] text-red-500 mt-1 leading-tight">{err}</div>}
+                        </td>
+                      </tr>); })}
+                  </tbody>
+                </table>
+              </div>
+              <div className="flex flex-wrap justify-between gap-2 mt-2 text-sm">
+                <span className="text-slate-500">{selected.length} batch(es) selected</span>
+                <span>Total return value: <b>{money(returnTotal)}</b> <span className="text-slate-400">(at batch cost)</span></span>
+              </div>
+              </>
             )}
           </div>
           <div className="mt-3"><Field label="Reason *"><input className={inputCls} value={reason} onChange={e => setReason(e.target.value)} placeholder="e.g. Near-expiry return as per distributor policy" /></Field></div>
-          {can(user.role, 'purchase.return') && <Btn className="w-full mt-4" onClick={submit}>Record purchase return</Btn>}
+          {can(user.role, 'purchase.return') && <Btn className="w-full mt-4" disabled={hasQtyError || selected.length === 0} onClick={submit}>Record purchase return{selected.length > 0 ? ` (${money(returnTotal)})` : ''}</Btn>}
+          {hasQtyError && <p className="text-xs text-red-500 mt-1.5">Fix the highlighted quantities before recording the return.</p>}
         </Card>
         <Card title="Return history">
           {db.purchaseReturns.length === 0 ? <Empty text="No purchase returns yet." /> : (
