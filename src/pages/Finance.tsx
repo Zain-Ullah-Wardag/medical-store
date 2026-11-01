@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { engine } from '../lib/store';
-import { Page, Card, Btn, Modal, Field, inputCls, money, Table, Empty, run, fmtDate, Stat, ExportBtn, Badge, toast } from '../components/ui';
+import { Page, Card, Btn, Modal, Field, inputCls, money, Table, Empty, run, fmtDate, fmtDateTime, Stat, ExportBtn, Badge, toast } from '../components/ui';
 import { toPaisa, todayStr, localDateOf } from '../core/money';
 import type { SessionUser } from '../core/types';
 import { can } from '../core/types';
@@ -9,12 +9,13 @@ export function Expenses({ user }: { user: SessionUser }) {
   const db = engine.db;
   const [form, setForm] = useState(false);
   const [cat, setCat] = useState(''); const [from, setFrom] = useState(todayStr().slice(0, 8) + '01'); const [to, setTo] = useState(todayStr());
+  const [statusF, setStatusF] = useState<'all' | 'active' | 'reversed'>('all');
   const [revId, setRevId] = useState<number | null>(null); const [revReason, setRevReason] = useState('');
-  const rows = db.expenses.filter(e => e.date >= from && e.date <= to && (!cat || e.category === cat)).sort((a, b) => b.id - a.id);
+  const rows = db.expenses.filter(e => e.date >= from && e.date <= to && (!cat || e.category === cat) && (statusF === 'all' || (statusF === 'reversed' ? !!e.reversedAt : !e.reversedAt))).sort((a, b) => b.id - a.id);
   return (
     <Page title="Expenses" sub="Operating expenses reduce net operating profit — they are never mixed into medicine cost."
       actions={<>
-        <ExportBtn filename={`expenses-${from}-to-${to}.csv`} rows={rows.map(e => ({ Date: e.date, Category: e.category, Description: e.description, AmountPKR: e.amountPaisa / 100, Method: e.method, Reversed: e.reversedAt ? 'Yes' : 'No', ReversalReason: e.reversalReason ?? '' }))} />
+        <ExportBtn filename={`expenses-${from}-to-${to}.csv`} rows={rows.map(e => ({ Date: e.date, Category: e.category, Description: e.description, AmountPKR: e.amountPaisa / 100, Method: e.method, RecordedBy: db.users.find(u => u.id === e.userId)?.fullName ?? '', Reversed: e.reversedAt ? 'Yes' : 'No', ReversedAt: e.reversedAt ?? '', ReversedBy: e.reversedBy ? (db.users.find(u => u.id === e.reversedBy)?.fullName ?? '') : '', ReversalReason: e.reversalReason ?? '' }))} />
         {can(user.role, 'expenses.create') && <Btn onClick={() => setForm(true)}>+ Add expense</Btn>}
       </>}>
       <div className="grid md:grid-cols-3 gap-3 mb-4">
@@ -22,15 +23,19 @@ export function Expenses({ user }: { user: SessionUser }) {
         {rows.some(e => e.reversedAt) && <Stat label="Reversed (excluded)" value={money(rows.filter(e => e.reversedAt).reduce((s, e) => s + e.amountPaisa, 0))} tone="slate" />}
       </div>
       <Card>
-        <div className="grid md:grid-cols-3 gap-2 mb-3">
+        <div className="grid md:grid-cols-4 gap-2 mb-3">
           <input type="date" className={inputCls} value={from} onChange={e => setFrom(e.target.value)} />
           <input type="date" className={inputCls} value={to} onChange={e => setTo(e.target.value)} />
           <select className={inputCls} value={cat} onChange={e => setCat(e.target.value)}><option value="">All categories</option>{db.settings.expenseCategories.map(c => <option key={c}>{c}</option>)}</select>
+          <select className={inputCls} value={statusF} onChange={e => setStatusF(e.target.value as any)}>
+            <option value="all">All (incl. reversed history)</option><option value="active">Active only</option><option value="reversed">Reversed only</option>
+          </select>
         </div>
+        <p className="text-xs text-slate-400 mb-3">Reversed expenses are never deleted — they stay here for audit, struck through, and are excluded from totals and reports.</p>
         {rows.length === 0 ? <Empty text="No expenses in this period." /> : (
           <Table head={['Date', 'Category', 'Description', 'Method', 'Recorded by', 'Amount', '']}>
             {rows.map(e => <tr key={e.id} className={e.reversedAt ? 'opacity-60' : ''}><td>{fmtDate(e.date)}</td><td><Badge>{e.category}</Badge>{e.reversedAt && <> <Badge color="amber">reversed</Badge></>}</td>
-              <td>{e.description}{e.reference ? ` · ${e.reference}` : ''}{e.reversedAt && <div className="text-xs text-slate-400">Reversed by {db.users.find(u => u.id === e.reversedBy)?.fullName ?? '—'}: {e.reversalReason}</div>}</td>
+              <td>{e.description}{e.reference ? ` · ${e.reference}` : ''}{e.reversedAt && <div className="text-xs text-slate-400">Reversed by {db.users.find(u => u.id === e.reversedBy)?.fullName ?? '—'} on {fmtDateTime(e.reversedAt)}: {e.reversalReason}</div>}</td>
               <td>{e.method}</td><td>{db.users.find(u => u.id === e.userId)?.fullName}</td><td className={`font-semibold ${e.reversedAt ? 'line-through' : ''}`}>{money(e.amountPaisa)}</td>
               <td>{!e.reversedAt && can(user.role, 'expenses.reverse') && <Btn kind="ghost" onClick={() => { setRevId(e.id); setRevReason(''); }}>Reverse</Btn>}</td></tr>)}
           </Table>

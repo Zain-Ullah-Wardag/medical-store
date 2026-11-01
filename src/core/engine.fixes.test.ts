@@ -327,3 +327,19 @@ describe('customer permissions & exports (Priorities 5-6)', () => {
     expect(eng.customerExportRows(admin, 'no-such-person').length).toBe(0);
   });
 });
+
+describe('expense reversal history traceability (Priority 8)', () => {
+  it('original record keeps who/when/why of the reversal and stays out of net totals', () => {
+    const e = eng.createExpense(admin, { date: todayStr(), category: 'Electricity', description: 'Bill Oct', amountPaisa: toPaisa(2500), method: 'Bank Transfer', reference: 'TXN-1' });
+    eng.reverseExpense(admin, e.id, 'Wrong meter number');
+    const saved = eng.db.expenses.find(x => x.id === e.id)!;
+    expect(saved.description).toBe('Bill Oct'); // original data intact
+    expect(saved.reversedBy).toBe(admin.id);
+    expect(saved.reversalReason).toBe('Wrong meter number');
+    expect(Number.isNaN(Date.parse(saved.reversedAt!))).toBe(false); // valid timestamp
+    // audit trail has BOTH events, consistent with the record
+    expect(eng.db.audit.some(a => a.action === 'expense.create')).toBe(true);
+    expect(eng.db.audit.some(a => a.action === 'expense.reverse' && a.details.includes('Wrong meter number'))).toBe(true);
+    expect(eng.rangeStats(todayStr(), todayStr()).expenses).toBe(0);
+  });
+});
