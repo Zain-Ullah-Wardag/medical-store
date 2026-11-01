@@ -81,3 +81,23 @@ Purchases (6,000) appear in their own column and are **not** part of profit.
   preserved and the adjustment appears on the party statement.
 - **Inventory valuation** consistently means saleable stock at batch cost (active, non-expired batches only) —
   in the valuation report, dashboard and slow-moving report alike.
+
+
+## POS price integrity & discounts (QA phase 2)
+
+- **Authorized selling price** (per base unit) is defined once: packaging-barcode price when that barcode sets
+  one, else the first FEFO batch's sell price, else the medicine retail price. Scans, manual adds and checkout
+  validation all use this rule.
+- **Price overrides.** The POS price field is locked for every role. Selling at any other price requires an
+  administrator-approved override with a reason (`pos.price.override`, administrators only). A cashier may
+  request one; the administrator's own credentials approve it (verified by the engine, never stored). Each
+  override records medicine, original/new price, requester, approver, reason and time, is written to Audit
+  Logs (`pos.price.override`), can be used once, and is stamped with the invoice it was consumed by.
+- **Discounts are separate from price.** Line discounts and the bill discount (fixed Rs or % of
+  subtotal-after-line-discounts, capped at 100%) remain available to POS roles because they are recorded on
+  the invoice and visible on receipts/reports — unlike a silent price edit. The engine rejects any discount
+  that would exceed the subtotal, so totals can never go negative.
+- **Cashier data policy.** Cashiers see only their own sales everywhere (Sales History, Dashboard figures,
+  trends, top-selling, recent sales — enforced in the engine). Purchases, supplier finances, customer/supplier
+  exports and balance adjustments are not cashier functions. Cashiers keep counter essentials: selling,
+  registering customers, viewing customer statements and receiving validated payments.
