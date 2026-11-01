@@ -44,7 +44,7 @@ describe('packaging barcodes & unit conversion', () => {
     const r = eng.resolveScan(BOX);
     const sale = eng.createSale(admin, {
       customerId: walkIn(), billDiscountPaisa: 0, idempotencyKey: 'box-1',
-      items: [{ medicineId: med.id, qty: r.baseQtyPerScan, unitPricePaisa: r.unitPricePaisa, discountPaisa: 0, packaging: r.packagingLabel }],
+      items: [{ medicineId: med.id, qty: r.baseQtyPerScan, unitPricePaisa: r.unitPricePaisa, discountPaisa: 0, packaging: r.packagingLabel, barcodeRecordId: r.barcodeRecord!.id }],
       payments: [{ method: 'Cash', amountPaisa: toPaisa(340) }],
     });
     expect(sale.totalPaisa).toBe(toPaisa(340));
@@ -55,10 +55,11 @@ describe('packaging barcodes & unit conversion', () => {
   it('repeated scans accumulate: 3 box scans = 30 base units in one sale', () => {
     const med = medWithBatches();
     let qty = 0;
-    for (let i = 0; i < 3; i++) qty += eng.resolveScan(BOX).baseQtyPerScan;
+    let boxRecId = 0;
+    for (let i = 0; i < 3; i++) { const rr = eng.resolveScan(BOX); qty += rr.baseQtyPerScan; boxRecId = rr.barcodeRecord!.id; }
     eng.createSale(admin, {
       customerId: walkIn(), billDiscountPaisa: 0, idempotencyKey: 'box-3',
-      items: [{ medicineId: med.id, qty, unitPricePaisa: toPaisa(34), discountPaisa: 0 }],
+      items: [{ medicineId: med.id, qty, unitPricePaisa: toPaisa(34), discountPaisa: 0, barcodeRecordId: boxRecId }],
       payments: [{ method: 'Cash', amountPaisa: toPaisa(1020) }],
     });
     expect(eng.saleableStock(med.id)).toBe(170);
@@ -186,7 +187,7 @@ describe('cancellation & rollback safety', () => {
     const before = JSON.stringify(eng.db);
     expect(() => eng.createSale(admin, {
       customerId: walkIn(), billDiscountPaisa: 0, idempotencyKey: 'fail-1',
-      items: [{ medicineId: med.id, qty: 21 * 10, unitPricePaisa: toPaisa(34), discountPaisa: 0 }], // 21 boxes > stock
+      items: [{ medicineId: med.id, qty: 21 * 10, unitPricePaisa: toPaisa(34), discountPaisa: 0, barcodeRecordId: eng.resolveScan(BOX).barcodeRecord!.id }], // 21 boxes > stock
       payments: [{ method: 'Cash', amountPaisa: toPaisa(7140) }],
     })).toThrow(/Insufficient saleable stock/);
     expect(JSON.stringify(eng.db)).toBe(before);

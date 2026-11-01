@@ -12,6 +12,7 @@ import { CameraScan } from '../components/CameraScan';
 interface CartLine {
   key: string; medicineId: number; qty: number; unitPricePaisa: number; discountPaisa: number;
   preferredBatchId?: number; packaging?: string; scannedBatchNo?: string;
+  barcodeRecordId?: number | null; priceOverrideId?: number | null; overrideNote?: string;
 }
 const lineKey = (medicineId: number, batchId?: number, packaging?: string) => `${medicineId}|${batchId ?? ''}|${packaging ?? ''}`;
 
@@ -30,6 +31,7 @@ export function POS({ user }: { user: SessionUser }) {
   const [idemKey, setIdemKey] = useState(uid());
   const [lastSale, setLastSale] = useState<Sale | null>(null);
   const [confirmClear, setConfirmClear] = useState(false);
+  const [overrideFor, setOverrideFor] = useState<CartLine | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [banner, setBanner] = useState<ScanBanner | null>(null);
   const [unknownCode, setUnknownCode] = useState<string | null>(null);
@@ -45,7 +47,7 @@ export function POS({ user }: { user: SessionUser }) {
   const results = useMemo(() => engine.searchMedicines(search), [search, db]);
 
   /** Adds base-units to the cart. Stock is NOT touched here — only at checkout. */
-  const addToCart = useCallback((m: Medicine, baseQty: number, unitPricePaisa: number, opts: { preferredBatchId?: number; packaging?: string; scannedBatchNo?: string } = {}): boolean => {
+  const addToCart = useCallback((m: Medicine, baseQty: number, unitPricePaisa: number, opts: { preferredBatchId?: number; packaging?: string; scannedBatchNo?: string; barcodeRecordId?: number | null } = {}): boolean => {
     const stock = engine.saleableStock(m.id);
     if (stock <= 0) { toast(`"${m.name}" has no saleable stock (out of stock or all batches expired).`, true); return false; }
     let added = true;
@@ -55,7 +57,7 @@ export function POS({ user }: { user: SessionUser }) {
       const key = lineKey(m.id, opts.preferredBatchId, opts.packaging);
       const ex = c.find(l => l.key === key);
       if (ex) return c.map(l => l.key === key ? { ...l, qty: l.qty + baseQty } : l);
-      return [...c, { key, medicineId: m.id, qty: baseQty, unitPricePaisa, discountPaisa: 0, preferredBatchId: opts.preferredBatchId, packaging: opts.packaging, scannedBatchNo: opts.scannedBatchNo }];
+      return [...c, { key, medicineId: m.id, qty: baseQty, unitPricePaisa, discountPaisa: 0, preferredBatchId: opts.preferredBatchId, packaging: opts.packaging, scannedBatchNo: opts.scannedBatchNo, barcodeRecordId: opts.barcodeRecordId ?? null }];
     });
     return added;
   }, []);
@@ -85,7 +87,7 @@ export function POS({ user }: { user: SessionUser }) {
     const qty = Math.max(1, sc.defaultScanQty) * r.baseQtyPerScan;
     const ok = addToCart(r.medicine, qty, r.unitPricePaisa, {
       preferredBatchId: r.matchedBatch?.id, packaging: r.packagingLabel !== r.medicine.unit ? r.packagingLabel : undefined,
-      scannedBatchNo: r.matchedBatch?.batchNo,
+      scannedBatchNo: r.matchedBatch?.batchNo, barcodeRecordId: r.barcodeRecord?.id ?? null,
     });
     if (!ok) { fail('⚠ Not enough saleable stock', r.medicine.name); return; }
     if (sc.beepOnSuccess) beepSuccess();
@@ -157,7 +159,7 @@ export function POS({ user }: { user: SessionUser }) {
     try {
       const sale = engine.createSale(user, {
         customerId,
-        items: cart.map(l => ({ medicineId: l.medicineId, qty: l.qty, unitPricePaisa: l.unitPricePaisa, discountPaisa: l.discountPaisa, preferredBatchId: l.preferredBatchId, packaging: l.packaging })),
+        items: cart.map(l => ({ medicineId: l.medicineId, qty: l.qty, unitPricePaisa: l.unitPricePaisa, discountPaisa: l.discountPaisa, preferredBatchId: l.preferredBatchId, packaging: l.packaging, barcodeRecordId: l.barcodeRecordId, priceOverrideId: l.priceOverrideId })),
         billDiscountPaisa: billDisc,
         payments: paid > 0 ? [{ method, amountPaisa: Math.min(paid, total) }] : [], idempotencyKey: idemKey,
       });
@@ -240,13 +242,15 @@ export function POS({ user }: { user: SessionUser }) {
                         <button className="w-7 h-7 rounded bg-slate-100 dark:bg-slate-700 font-bold" onClick={() => setCart(c => c.map(x => x.key === l.key ? { ...x, qty: Math.max(1, x.qty - 1) } : x))}>−</button>
                         <input className={inputCls + ' !w-16 text-center'} type="number" min={1} value={l.qty}
                           onChange={e => setCart(c => c.map(x => x.key === l.key ? { ...x, qty: Math.max(1, parseInt(e.target.value) || 1) } : x))} />
-                        <button className="w-7 h-7 rounded bg-slate-100 dark:bg-slate-700 font-bold" onClick={() => addToCart(m, 1, l.unitPricePaisa, { preferredBatchId: l.preferredBatchId, packaging: l.packaging, scannedBatchNo: l.scannedBatchNo })}>+</button>
+                        <button className="w-7 h-7 rounded bg-slate-100 dark:bg-slate-700 font-bold" onClick={() => addToCart(m, 1, l.unitPricePaisa, { preferredBatchId: l.preferredBatchId, packaging: l.packaging, scannedBatchNo: l.scannedBatchNo, barcodeRecordId: l.barcodeRecordId })}>+</button>
                       </div>
-                      <input className={inputCls + ' !w-24'} type="number" min={0} title={`Price per ${m.unit} (Rs)`} value={l.unitPricePaisa / 100}
-                        onChange={e => setCart(c => c.map(x => x.key === l.key ? { ...x, unitPricePaisa: toPaisa(e.target.value) } : x))} />
+                      <div className="flex items-center gap-1" title={`Authorized price per ${m.unit}. Any other price needs an administrator-approved override.`}>
+                        <input className={inputCls + ' !w-24 bg-slate-50 dark:bg-slate-700/40'} type="number" min={0} readOnly value={l.unitPricePaisa / 100} />
+                        <button className="w-7 h-7 rounded bg-amber-100 dark:bg-amber-900/40 text-sm" title="Request administrator price override" onClick={() => setOverrideFor(l)}>🔑</button>
+                      </div>
                       <input className={inputCls + ' !w-20'} type="number" min={0} placeholder="Disc Rs" title="Line discount Rs" value={l.discountPaisa ? l.discountPaisa / 100 : ''}
                         onChange={e => setCart(c => c.map(x => x.key === l.key ? { ...x, discountPaisa: toPaisa(e.target.value) } : x))} />
-                      <div className="w-24 text-right font-bold text-sm">{money(l.qty * l.unitPricePaisa - l.discountPaisa)}</div>
+                      <div className="w-24 text-right font-bold text-sm">{money(l.qty * l.unitPricePaisa - l.discountPaisa)}{l.overrideNote && <div className="text-[10px] font-semibold text-amber-600">{l.overrideNote}</div>}</div>
                       <button className="text-red-500 font-bold px-1" onClick={() => setCart(c => c.filter(x => x.key !== l.key))} title="Remove">✕</button>
                     </div>
                   );
@@ -306,6 +310,13 @@ export function POS({ user }: { user: SessionUser }) {
       )}
       {cameraOpen && <CameraScan close={() => setCameraOpen(false)} onScan={(code) => handleScan(code)} />}
       {confirmClear && <Confirm text="Cancel this sale and clear the cart? No stock, cash or ledger changes have been made yet — nothing to undo." onNo={() => setConfirmClear(false)} onYes={() => { setCart([]); setBanner(null); setConfirmClear(false); barcodeRef.current?.focus(); }} />}
+      {overrideFor && (
+        <PriceOverrideModal user={user} line={overrideFor} close={() => setOverrideFor(null)}
+          apply={(newPricePaisa, overrideId, note) => {
+            setCart(c => c.map(x => x.key === overrideFor.key ? { ...x, unitPricePaisa: newPricePaisa, priceOverrideId: overrideId, overrideNote: note } : x));
+            setOverrideFor(null);
+          }} />
+      )}
     </Page>
   );
 }
@@ -383,3 +394,50 @@ function UnknownBarcodeModal({ user, code, close, onRegistered }: { user: Sessio
     </Modal>
   );
 }
+
+/** Administrator-approved price override. The price field in the cart is
+ *  locked for every role; this modal is the only way to change it, and the
+ *  engine verifies the approver (admin credentials when the cashier asks). */
+function PriceOverrideModal({ user, line, close, apply }: {
+  user: SessionUser; line: CartLine; close: () => void;
+  apply: (newPricePaisa: number, overrideId: number, note: string) => void;
+}) {
+  const med = engine.medicine(line.medicineId);
+  const authorized = engine.authorizedUnitPrice(line.medicineId, line.barcodeRecordId);
+  const selfApprove = can(user.role, 'pos.price.override');
+  const [priceRs, setPriceRs] = useState(String(line.unitPricePaisa / 100));
+  const [reason, setReason] = useState('');
+  const [adminUser, setAdminUser] = useState('');
+  const [adminPw, setAdminPw] = useState('');
+  const submit = () => {
+    try {
+      const rec = engine.authorizePriceOverride(user, {
+        medicineId: line.medicineId, barcodeRecordId: line.barcodeRecordId,
+        newUnitPricePaisa: toPaisa(priceRs || 0), reason,
+        approverUsername: selfApprove ? undefined : adminUser,
+        approverPassword: selfApprove ? undefined : adminPw,
+      });
+      toast('Price override approved and recorded in Audit Logs.');
+      apply(rec.newPricePaisa, rec.id, '🔑 admin-approved price');
+    } catch (e: any) { toast(e.message, true); }
+  };
+  return (
+    <Modal title={`Price override — ${medLabel(med)}`} onClose={close}>
+      <p className="text-sm text-slate-500 mb-3">Authorized selling price: <b>{money(authorized)}</b> per {med.unit}. Selling at any other price requires administrator approval with a reason. The approval (old price, new price, approver, reason, time) is written to Audit Logs and linked to the invoice.</p>
+      <div className="grid grid-cols-2 gap-3">
+        <Field label={`New price per ${med.unit} (Rs) *`}><input type="number" min={0} className={inputCls} value={priceRs} onChange={e => setPriceRs(e.target.value)} autoFocus /></Field>
+        <Field label="Reason *"><input className={inputCls} value={reason} onChange={e => setReason(e.target.value)} placeholder="e.g. Damaged outer box — owner agreed" /></Field>
+        {!selfApprove && (<>
+          <Field label="Administrator username *"><input className={inputCls} value={adminUser} onChange={e => setAdminUser(e.target.value)} autoComplete="off" /></Field>
+          <Field label="Administrator password *"><input type="password" className={inputCls} value={adminPw} onChange={e => setAdminPw(e.target.value)} autoComplete="new-password" /></Field>
+        </>)}
+      </div>
+      {selfApprove && <p className="text-xs text-slate-400 mt-2">You are approving this override yourself ({user.fullName}).</p>}
+      <div className="flex justify-end gap-2 mt-5">
+        <Btn kind="ghost" onClick={close}>Cancel</Btn>
+        <Btn disabled={!reason.trim() || priceRs === '' || (!selfApprove && (!adminUser.trim() || !adminPw))} onClick={submit}>Approve & apply price</Btn>
+      </div>
+    </Modal>
+  );
+}
+

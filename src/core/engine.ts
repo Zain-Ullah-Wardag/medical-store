@@ -40,7 +40,7 @@ const emptySettings = (): T.Settings => ({
 
 export const emptyDb = (): T.DbState => ({
   version: 2, seq: {},
-  users: [], categories: [], medicines: [], medicineBarcodes: [], batches: [], suppliers: [], customers: [],
+  users: [], categories: [], medicines: [], medicineBarcodes: [], priceOverrides: [], batches: [], suppliers: [], customers: [],
   purchases: [], purchaseItems: [], supplierPayments: [], sales: [], saleItems: [], salePayments: [],
   salesReturns: [], salesReturnItems: [], purchaseReturns: [], purchaseReturnItems: [],
   customerPayments: [], ledger: [], expenses: [], cashSessions: [], cashMovements: [],
@@ -57,6 +57,7 @@ export function migrateDb(db: T.DbState): T.DbState {
   if (!Array.isArray(db.medicineBarcodes)) db.medicineBarcodes = [];
   if (!db.settings.scanner) db.settings.scanner = defaultScannerSettings();
   if (db.settings.lastBackupAt === undefined) db.settings.lastBackupAt = '';
+  if (!Array.isArray((db as any).priceOverrides)) (db as any).priceOverrides = [];
   if ((db.version ?? 1) < 2) {
     let nextId = (db.seq['medicineBarcodes'] ?? 0);
     for (const m of db.medicines) {
@@ -393,8 +394,7 @@ export class Engine {
     const warnings = [...parsed.errors];
     const units = rec?.unitsPerPackage ?? 1;
     const packagingLabel = rec ? (units > 1 ? `${rec.packagingLevel} ×${units} ${med.unit}` : rec.packagingLevel) : med.unit;
-    const firstBatch = this.eligibleBatches(med.id)[0];
-    const unitPricePaisa = rec && rec.sellPricePaisa > 0 ? Math.round(rec.sellPricePaisa / units) : (firstBatch?.sellPricePaisa || med.retailPricePaisa);
+    const unitPricePaisa = this.authorizedUnitPrice(med.id, rec?.id);
     const res: ScanResolution = {
       status: 'found', parsed, medicine: med, barcodeRecord: rec,
       baseQtyPerScan: units, unitPricePaisa, packagingLabel, message: med.name, warnings,
@@ -501,9 +501,65 @@ export class Engine {
     return allocs;
   }
 
+  /**
+   * THE authorized selling price (per base unit) for a medicine right now:
+   * packaging-barcode price when that barcode defines one, else the first
+   * FEFO batch's sell price, else the medicine retail price. This single
+   * rule prices scans, manual POS adds AND validates checkout — any other
+   * unit price on a sale line requires an approved PriceOverride.
+   */
+  authorizedUnitPrice(medicineId: number, barcodeRecordId?: number | null): number {
+    const med = this.medicine(medicineId);
+    if (barcodeRecordId) {
+      const rec = this.db.medicineBarcodes.find(b => b.id === barcodeRecordId && b.medicineId === medicineId);
+      if (rec && rec.sellPricePaisa > 0) return Math.round(rec.sellPricePaisa / rec.unitsPerPackage);
+    }
+    const firstBatch = this.eligibleBatches(medicineId)[0];
+    return firstBatch?.sellPricePaisa || med.retailPricePaisa;
+  }
+
+  /**
+   * Supervisor authorization for selling one medicine at a non-standard
+   * price. The approver must hold 'pos.price.override' (administrator).
+   * If the requesting user is not an approver, the approver's own
+   * credentials must be supplied and are verified here — they are never
+   * stored. Returns the override record to attach to the POS line.
+   */
+  authorizePriceOverride(actor: T.SessionUser, input: {
+    medicineId: number; barcodeRecordId?: number | null; newUnitPricePaisa: number; reason: string;
+    approverUsername?: string; approverPassword?: string;
+  }): T.PriceOverride {
+    if (!Number.isInteger(input.newUnitPricePaisa) || input.newUnitPricePaisa < 0) throw new AppError('New price must be zero or more.');
+    if (!input.reason.trim()) throw new AppError('A reason is required for a price override.');
+    const original = this.authorizedUnitPrice(input.medicineId, input.barcodeRecordId);
+    if (input.newUnitPricePaisa === original) throw new AppError('The new price is the same as the current selling price — no override is needed.');
+    let approver: T.User | undefined;
+    if (T.can(actor.role, 'pos.price.override')) {
+      approver = this.db.users.find(u => u.id === actor.id);
+    } else {
+      if (!input.approverUsername?.trim() || !input.approverPassword) throw new AppError('Administrator approval is required: enter the administrator username and password.');
+      approver = this.db.users.find(u => u.username.toLowerCase() === input.approverUsername!.trim().toLowerCase() && u.active);
+      if (!approver || !bcrypt.compareSync(input.approverPassword, approver.passwordHash)) throw new AppError('Administrator username or password is incorrect.');
+      if (!T.can(approver.role, 'pos.price.override')) throw new AppError(`"${approver.fullName}" is not authorized to approve price overrides (administrator required).`);
+    }
+    if (!approver) throw new AppError('Approver account not found.');
+    return this.tx(() => {
+      const rec: T.PriceOverride = {
+        id: this.id('priceOverrides'), medicineId: input.medicineId, barcodeRecordId: input.barcodeRecordId ?? null,
+        originalPricePaisa: original, newPricePaisa: input.newUnitPricePaisa,
+        requestedBy: actor.id, approvedBy: approver!.id, reason: input.reason.trim(), dateTime: nowISO(),
+        saleId: null, invoiceNo: '',
+      };
+      this.db.priceOverrides.push(rec);
+      const med = this.medicine(input.medicineId);
+      this.log(actor, 'pos.price.override', `${med.name}: unit price ${original} -> ${input.newUnitPricePaisa} paisa approved by ${approver!.fullName} (${approver!.username}). Reason: ${rec.reason}`);
+      return rec;
+    });
+  }
+
   // ---------- sales ----------
   createSale(actor: T.SessionUser, input: {
-    customerId: number; items: { medicineId: number; qty: number; unitPricePaisa: number; discountPaisa: number; preferredBatchId?: number; packaging?: string }[];
+    customerId: number; items: { medicineId: number; qty: number; unitPricePaisa: number; discountPaisa: number; preferredBatchId?: number; packaging?: string; barcodeRecordId?: number | null; priceOverrideId?: number | null }[];
     billDiscountPaisa: number; payments: { method: string; amountPaisa: number }[]; idempotencyKey: string;
   }): T.Sale {
     this.require(actor, 'pos');
@@ -514,9 +570,11 @@ export class Engine {
       const s = this.db.settings;
       // merge duplicate lines — keyed by medicine AND scanned batch, so a
       // GS1-identified line keeps its batch instead of merging into FEFO.
-      const merged = new Map<string, { medicineId: number; qty: number; unitPricePaisa: number; discountPaisa: number; preferredBatchId?: number; packaging?: string }>();
+      const merged = new Map<string, { medicineId: number; qty: number; unitPricePaisa: number; discountPaisa: number; preferredBatchId?: number; packaging?: string; barcodeRecordId?: number | null; priceOverrideId?: number | null }>();
       for (const it of input.items) {
-        const key = `${it.medicineId}|${it.preferredBatchId ?? ''}|${it.packaging ?? ''}`;
+        // unit price is part of the merge key: lines at different prices
+        // (e.g. one overridden) must never be blended into one price.
+        const key = `${it.medicineId}|${it.preferredBatchId ?? ''}|${it.packaging ?? ''}|${it.unitPricePaisa}`;
         const cur = merged.get(key);
         if (cur) { cur.qty += it.qty; cur.discountPaisa += it.discountPaisa; } else merged.set(key, { ...it });
       }
@@ -526,9 +584,20 @@ export class Engine {
       const reserved = new Map<number, number>(); // batchId -> qty reserved in this sale
       const lines: { med: T.Medicine; qty: number; unitPricePaisa: number; discountPaisa: number; lineTotal: number; allocations: T.Allocation[]; packaging?: string }[] = [];
       let subtotal = 0, lineDiscounts = 0;
+      const usedOverrides: T.PriceOverride[] = [];
       for (const it of merged.values()) {
         const med = this.medicine(it.medicineId);
         if (!med.active) throw new AppError(`"${med.name}" is inactive and cannot be sold.`);
+        // PRICE AUTHORIZATION (engine-level; cannot be bypassed by the UI):
+        // the unit price must equal the authorized selling price, unless an
+        // unused administrator-approved override covers this exact price.
+        const authorized = this.authorizedUnitPrice(it.medicineId, it.barcodeRecordId);
+        if (it.unitPricePaisa !== authorized) {
+          const ov = it.priceOverrideId ? this.db.priceOverrides.find(o => o.id === it.priceOverrideId) : undefined;
+          if (!ov || ov.medicineId !== it.medicineId || ov.newPricePaisa !== it.unitPricePaisa || ov.saleId !== null)
+            throw new AppError(`Selling price of "${med.name}" (${it.unitPricePaisa} paisa) differs from the authorized price (${authorized} paisa). A price change needs an administrator-approved override with a reason (POS → 🔑 on the line).`);
+          usedOverrides.push(ov);
+        }
         const allocations = this.allocateFEFO(it.medicineId, it.qty, it.preferredBatchId, reserved); // rechecks stock + expiry NOW
         for (const al of allocations) reserved.set(al.batchId, (reserved.get(al.batchId) ?? 0) + al.qty);
         const gross = it.unitPricePaisa * it.qty;
@@ -553,6 +622,7 @@ export class Engine {
       s.nextInvoiceSeq += 1;
       const sale: T.Sale = { id: this.id('sales'), invoiceNo, dateTime: nowISO(), customerId: input.customerId, userId: actor.id, subtotalPaisa: subtotal, discountPaisa: discountTotal, taxPaisa, totalPaisa: total, paidPaisa: paid, idempotencyKey: input.idempotencyKey };
       this.db.sales.push(sale);
+      for (const ov of usedOverrides) { ov.saleId = sale.id; ov.invoiceNo = invoiceNo; }
       for (const ln of lines) {
         const item: T.SaleItem = { id: this.id('saleItems'), saleId: sale.id, medicineId: ln.med.id, medicineName: `${ln.med.name}${ln.med.strength ? ' ' + ln.med.strength : ''}`, qty: ln.qty, unitPricePaisa: ln.unitPricePaisa, discountPaisa: ln.discountPaisa, lineTotalPaisa: ln.lineTotal, allocations: ln.allocations, packaging: ln.packaging };
         this.db.saleItems.push(item);

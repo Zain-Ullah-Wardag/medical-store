@@ -61,6 +61,16 @@ export interface SupplierPayment { id: number; supplierId: number; date: string;
 
 export interface Allocation { batchId: number; batchNo: string; expiryDate: string; qty: number; costPaisa: number; }
 export interface Sale { id: number; invoiceNo: string; dateTime: string; customerId: number; userId: number; subtotalPaisa: number; discountPaisa: number; taxPaisa: number; totalPaisa: number; paidPaisa: number; idempotencyKey: string; }
+/** An administrator-approved POS selling-price override. Created BEFORE the
+ *  sale (supervisor authorization), consumed by exactly one sale line, and
+ *  stamped with the invoice it was used on. Never edited after creation. */
+export interface PriceOverride {
+  id: number; medicineId: number; barcodeRecordId: number | null;
+  originalPricePaisa: number; newPricePaisa: number;
+  requestedBy: number; approvedBy: number; reason: string; dateTime: string;
+  saleId: number | null; invoiceNo: string;
+}
+
 export interface SaleItem { id: number; saleId: number; medicineId: number; medicineName: string; qty: number; unitPricePaisa: number; discountPaisa: number; lineTotalPaisa: number; allocations: Allocation[]; /** e.g. "box ×10 strips" when sold via a packaging barcode */ packaging?: string; }
 export interface SalePayment { id: number; saleId: number; method: string; amountPaisa: number; dateTime: string; }
 
@@ -96,7 +106,7 @@ export interface Settings {
 
 export interface DbState {
   version: number; seq: Record<string, number>;
-  users: User[]; categories: Category[]; medicines: Medicine[]; medicineBarcodes: MedicineBarcode[]; batches: Batch[];
+  users: User[]; categories: Category[]; medicines: Medicine[]; medicineBarcodes: MedicineBarcode[]; priceOverrides: PriceOverride[]; batches: Batch[];
   suppliers: Supplier[]; customers: Customer[]; purchases: Purchase[]; purchaseItems: PurchaseItem[];
   supplierPayments: SupplierPayment[]; sales: Sale[]; saleItems: SaleItem[]; salePayments: SalePayment[];
   salesReturns: SalesReturn[]; salesReturnItems: SalesReturnItem[]; purchaseReturns: PurchaseReturn[];

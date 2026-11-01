@@ -212,3 +212,52 @@ describe('engine-level permission enforcement (verification)', () => {
     expect(() => eng.adjustPartyBalance(cashier, 'customer', cust.id, 100, 'x')).toThrow(/Permission denied/);
   });
 });
+
+describe('POS price permissions (Priority 2)', () => {
+  const sellAt = (actor: SessionUser, medId: number, pricePaisa: number, overrideId?: number, key = 'pp-' + Math.random()) =>
+    eng.createSale(actor, { customerId: walkIn(), billDiscountPaisa: 0, idempotencyKey: key, items: [{ medicineId: medId, qty: 1, unitPricePaisa: pricePaisa, discountPaisa: 0, priceOverrideId: overrideId ?? null }], payments: [{ method: 'Cash', amountPaisa: pricePaisa }] });
+
+  it('authorized price: batch sell price wins, retail is fallback, packaging price divides', () => {
+    const med = stockedMed(26, 35, 50); // batch sell 35
+    expect(eng.authorizedUnitPrice(med.id)).toBe(toPaisa(35));
+    const box = eng.addMedicineBarcode(admin, { medicineId: med.id, barcode: 'BOX-PP', packagingLevel: 'box', unitsPerPackage: 10, sellPricePaisa: toPaisa(320), purchaseCostPaisa: 0 });
+    expect(eng.authorizedUnitPrice(med.id, box.id)).toBe(toPaisa(32));
+  });
+  it('cashier (and pharmacist) cannot sell at a changed price without an override — engine rejects', () => {
+    const med = stockedMed();
+    expect(() => sellAt(cashier, med.id, toPaisa(30))).toThrow(/differs from the authorized price/);
+    expect(() => sellAt(pharm, med.id, toPaisa(40))).toThrow(/differs from the authorized price/);
+    expect(() => sellAt(admin, med.id, toPaisa(40))).toThrow(/differs from the authorized price/); // even admin needs a recorded override
+    expect(eng.db.sales.length).toBe(0);
+    // normal price works for everyone
+    expect(sellAt(cashier, med.id, toPaisa(35)).totalPaisa).toBe(toPaisa(35));
+  });
+  it('administrator-supervised override: cashier requests, admin credentials approve, audit + invoice recorded', () => {
+    const med = stockedMed();
+    expect(() => eng.authorizePriceOverride(cashier, { medicineId: med.id, newUnitPricePaisa: toPaisa(30), reason: 'x' })).toThrow(/Administrator approval is required/);
+    expect(() => eng.authorizePriceOverride(cashier, { medicineId: med.id, newUnitPricePaisa: toPaisa(30), reason: 'x', approverUsername: 'admin', approverPassword: 'wrong' })).toThrow(/incorrect/);
+    expect(() => eng.authorizePriceOverride(cashier, { medicineId: med.id, newUnitPricePaisa: toPaisa(30), reason: 'x', approverUsername: 'pharm', approverPassword: 'pharm123' })).toThrow(/not authorized to approve/);
+    expect(() => eng.authorizePriceOverride(cashier, { medicineId: med.id, newUnitPricePaisa: toPaisa(30), reason: '', approverUsername: 'admin', approverPassword: 'secret1' })).toThrow(/reason is required/);
+    const ov = eng.authorizePriceOverride(cashier, { medicineId: med.id, newUnitPricePaisa: toPaisa(30), reason: 'Box damaged — owner agreed', approverUsername: 'admin', approverPassword: 'secret1' });
+    const sale = sellAt(cashier, med.id, toPaisa(30), ov.id);
+    expect(sale.totalPaisa).toBe(toPaisa(30));
+    const saved = eng.db.priceOverrides.find(o => o.id === ov.id)!;
+    expect(saved.originalPricePaisa).toBe(toPaisa(35));
+    expect(saved.newPricePaisa).toBe(toPaisa(30));
+    expect(saved.approvedBy).toBe(admin.id);
+    expect(saved.requestedBy).toBe(cashier.id);
+    expect(saved.saleId).toBe(sale.id);
+    expect(saved.invoiceNo).toBe(sale.invoiceNo);
+    const audit = eng.db.audit.find(a => a.action === 'pos.price.override')!;
+    expect(audit.details).toMatch(/3500 -> 3000/);
+    expect(audit.details).toMatch(/Box damaged/);
+    // a consumed override cannot be reused
+    expect(() => sellAt(cashier, med.id, toPaisa(30), ov.id)).toThrow(/differs from the authorized price/);
+  });
+  it('admin can self-approve; override for a different price/medicine does not validate', () => {
+    const med = stockedMed();
+    const ov = eng.authorizePriceOverride(admin, { medicineId: med.id, newUnitPricePaisa: toPaisa(33), reason: 'Regular customer' });
+    expect(() => sellAt(admin, med.id, toPaisa(31), ov.id)).toThrow(/differs from the authorized price/);
+    expect(sellAt(admin, med.id, toPaisa(33), ov.id).totalPaisa).toBe(toPaisa(33));
+  });
+});

@@ -52,11 +52,12 @@ fn migrate(conn: &Connection) -> Result<(), String> {
     )
     .map_err(|e| e.to_string())?;
     // Apply bundled relational migrations exactly once each, in version order.
-    // 001 = initial schema, 002 = multi-barcode packaging, 003 = expense reversal (all non-destructive).
+    // 001 = initial schema, 002 = multi-barcode packaging, 003 = expense reversal, 004 = price overrides (all non-destructive).
     const MIGRATIONS: &[(i64, &str)] = &[
         (1, include_str!("../../database/migrations/001_initial.sql")),
         (2, include_str!("../../database/migrations/002_barcodes.sql")),
         (3, include_str!("../../database/migrations/003_quality_fixes.sql")),
+        (4, include_str!("../../database/migrations/004_price_overrides.sql")),
     ];
     for (version, sql) in MIGRATIONS {
         let applied: bool = conn
