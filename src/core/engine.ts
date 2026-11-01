@@ -706,6 +706,12 @@ export class Engine {
   }
 
   // ---------- purchases ----------
+  /** Purchase records are restricted data (costs, supplier terms): listing
+   *  them requires 'purchases.view', enforced here — not just in the UI. */
+  listPurchases(actor: T.SessionUser): T.Purchase[] {
+    this.require(actor, 'purchases.view');
+    return [...this.db.purchases].sort((a, b) => b.id - a.id);
+  }
   createPurchase(actor: T.SessionUser, input: {
     supplierId: number; supplierInvoiceNo: string; date: string;
     items: { medicineId: number; batchNo: string; mfgDate: string; expiryDate: string; qty: number; costPaisa: number; sellPricePaisa: number }[];
@@ -780,7 +786,10 @@ export class Engine {
     this.require(actor, 'suppliers.edit');
     if (!input.name.trim()) throw new AppError('Supplier name is required.');
     return this.tx(() => {
-      if (input.id) { const s = this.db.suppliers.find(x => x.id === input.id); if (!s) throw new AppError('Supplier not found.'); Object.assign(s, input); this.log(actor, 'supplier.update', s.name); return s; }
+      if (input.id) { const s = this.db.suppliers.find(x => x.id === input.id); if (!s) throw new AppError('Supplier not found.');
+        if (input.openingBalancePaisa !== undefined && input.openingBalancePaisa !== s.openingBalancePaisa)
+          throw new AppError('Opening balance cannot be changed after creation. Use Supplier Ledger → Adjust balance (reason required, audited).');
+        Object.assign(s, input); this.log(actor, 'supplier.update', s.name); return s; }
       const s: T.Supplier = { id: this.id('suppliers'), name: input.name.trim(), contactPerson: input.contactPerson ?? '', phone: input.phone ?? '', address: input.address ?? '', email: input.email ?? '', openingBalancePaisa: input.openingBalancePaisa ?? 0, notes: input.notes ?? '', active: true };
       this.db.suppliers.push(s); this.log(actor, 'supplier.create', s.name); return s;
     });
@@ -789,7 +798,10 @@ export class Engine {
     this.require(actor, 'customers.edit');
     if (!input.name.trim()) throw new AppError('Customer name is required.');
     return this.tx(() => {
-      if (input.id) { const c = this.db.customers.find(x => x.id === input.id); if (!c) throw new AppError('Customer not found.'); Object.assign(c, input); this.log(actor, 'customer.update', c.name); return c; }
+      if (input.id) { const c = this.db.customers.find(x => x.id === input.id); if (!c) throw new AppError('Customer not found.');
+        if (input.openingBalancePaisa !== undefined && input.openingBalancePaisa !== c.openingBalancePaisa)
+          throw new AppError('Opening balance cannot be changed after creation. Use Customer Ledger → Adjust balance (reason required, audited).');
+        Object.assign(c, input); this.log(actor, 'customer.update', c.name); return c; }
       const c: T.Customer = { id: this.id('customers'), name: input.name.trim(), phone: input.phone ?? '', address: input.address ?? '', openingBalancePaisa: input.openingBalancePaisa ?? 0, notes: input.notes ?? '', active: true };
       this.db.customers.push(c); this.log(actor, 'customer.create', c.name); return c;
     });
@@ -797,6 +809,9 @@ export class Engine {
   customerPayment(actor: T.SessionUser, input: { customerId: number; amountPaisa: number; method: string; reference: string; saleId: number | null; date: string }) {
     this.require(actor, 'payments.create');
     if (input.amountPaisa <= 0) throw new AppError('Payment amount must be positive.');
+    const walkInId = this.db.customers[0]?.id;
+    if (input.customerId === walkInId && !input.reference.trim())
+      throw new AppError('Walk-in Customer is a shared counter record: advances/payments need a reference, and should normally be recorded against a named customer.');
     return this.tx(() => {
       const p: T.CustomerPayment = { id: this.id('customerPayments'), customerId: input.customerId, date: input.date || todayStr(), amountPaisa: input.amountPaisa, method: input.method, reference: input.reference || '', userId: actor.id, saleId: input.saleId };
       this.db.customerPayments.push(p);
@@ -808,6 +823,7 @@ export class Engine {
   }
   supplierPayment(actor: T.SessionUser, input: { supplierId: number; amountPaisa: number; method: string; reference: string; date: string; allowAdvance?: boolean }) {
     this.require(actor, 'payments.create');
+    this.require(actor, 'suppliers.view'); // supplier finances are not a cashier function
     if (!Number.isInteger(input.amountPaisa) || input.amountPaisa <= 0) throw new AppError('Payment amount must be a positive amount.');
     const outstanding = this.supplierBalance(input.supplierId);
     const excess = input.amountPaisa - Math.max(0, outstanding);
@@ -857,6 +873,26 @@ export class Engine {
   }
   markBackupDone(actor: T.SessionUser) {
     return this.tx(() => { this.db.settings.lastBackupAt = nowISO(); this.log(actor, 'backup.create', 'Backup file created'); });
+  }
+  /** CSV export data builders — permission-checked in the engine so exports
+   *  cannot be produced by unauthorized roles even if the UI is bypassed. */
+  customerExportRows(actor: T.SessionUser, query = ''): Record<string, string | number>[] {
+    this.require(actor, 'customers.export');
+    const q = query.trim().toLowerCase();
+    return this.db.customers
+      .filter(c => !q || c.name.toLowerCase().includes(q) || c.phone.includes(q))
+      .map(c => { const bal = this.customerBalance(c.id); return { Name: c.name, Phone: c.phone, Address: c.address, BalancePKR: bal / 100, Meaning: bal > 0 ? 'Owes us' : bal < 0 ? 'Advance held' : 'Clear' }; });
+  }
+  supplierExportRows(actor: T.SessionUser, query = ''): Record<string, string | number>[] {
+    this.require(actor, 'suppliers.export');
+    const q = query.trim().toLowerCase();
+    return this.db.suppliers
+      .filter(x => !q || x.name.toLowerCase().includes(q) || x.phone.includes(q) || x.contactPerson.toLowerCase().includes(q) || x.address.toLowerCase().includes(q))
+      .map(x => { const bal = this.supplierBalance(x.id); return { Name: x.name, Contact: x.contactPerson, Phone: x.phone, Address: x.address, BalancePKR: bal / 100, Meaning: bal > 0 ? 'We owe them' : bal < 0 ? 'Advance (supplier credit)' : 'Clear' }; });
+  }
+  partyLedgerExportRows(actor: T.SessionUser, kind: 'customer' | 'supplier', partyId: number): Record<string, string | number>[] {
+    this.require(actor, kind === 'customer' ? 'customers.export' : 'suppliers.export');
+    return this.partyLedger(kind, partyId).map(e => ({ Date: e.dateTime, Type: e.type, Reference: e.reference, DebitPKR: e.debitPaisa / 100, CreditPKR: e.creditPaisa / 100, RunningBalancePKR: e.runningPaisa / 100 }));
   }
   partyLedger(partyType: 'customer' | 'supplier', partyId: number) {
     const party = partyType === 'customer' ? this.db.customers.find(c => c.id === partyId) : this.db.suppliers.find(s => s.id === partyId);

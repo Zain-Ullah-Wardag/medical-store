@@ -27,7 +27,7 @@ const NAV: { key: PageKey; label: string; icon: string; perm: string }[] = [
   { key: 'salesReturns', label: 'Sales Returns', icon: '↩️', perm: 'sales.return' },
   { key: 'purchaseReturns', label: 'Purchase Returns', icon: '📤', perm: 'purchase.return' },
   { key: 'customers', label: 'Customers', icon: '👥', perm: 'customers.view' },
-  { key: 'custLedger', label: 'Customer Ledger', icon: '📒', perm: 'ledgers.view' },
+  { key: 'custLedger', label: 'Customer Ledger', icon: '📒', perm: 'customerLedger.view' },
   { key: 'suppLedger', label: 'Supplier Ledger', icon: '📓', perm: 'ledgers.view' },
   { key: 'expenses', label: 'Expenses', icon: '💸', perm: 'expenses.view' },
   { key: 'cash', label: 'Cash Management', icon: '💵', perm: 'cash.view' },
@@ -67,13 +67,31 @@ export default function App() {
   if (db.users.length === 0) return <><SetupWizard onDone={onLogin} /><ToastHost /></>;
   if (!user) return <><Login onLogin={onLogin} /><ToastHost /></>;
 
-  const visibleNav = NAV.filter(n => can(user.role, n.perm) || can(user.role, n.perm.replace('.own', '')) || (n.key === 'salesReturns' && user.role === 'cashier' && db.settings.allowCashierReturns));
+  const pageAllowedFor = (key: PageKey): boolean => {
+    const n = NAV.find(x => x.key === key);
+    if (!n) return true;
+    return can(user.role, n.perm) || can(user.role, n.perm.replace('.own', '')) || (n.key === 'salesReturns' && user.role === 'cashier' && db.settings.allowCashierReturns);
+  };
+  const visibleNav = NAV.filter(n => pageAllowedFor(n.key));
   const alerts = engine.alerts();
   const alertCount = alerts.expired.length + alerts.nearExpiry.length + alerts.lowStock.length;
 
   const go = (p: string) => { setPage(p as PageKey); setMobileNav(false); };
 
   const content = (() => {
+    // Route guard: a page component is only ever rendered when the signed-in
+    // role holds its permission. Sidebar hiding is NOT the protection —
+    // dashboard shortcuts or any direct navigation land here and are denied.
+    if (!pageAllowedFor(page)) {
+      return (
+        <div className="p-6 max-w-xl mx-auto mt-16 text-center">
+          <div className="text-5xl mb-3">🔒</div>
+          <h2 className="text-xl font-bold mb-2">Access not permitted</h2>
+          <p className="text-sm text-slate-500 mb-5">Your account ({user.fullName}, {user.role}) does not have permission to open this section. Ask the administrator if you need access.</p>
+          <Btn onClick={() => go('dashboard')}>Go to Dashboard</Btn>
+        </div>
+      );
+    }
     switch (page) {
       case 'dashboard': return <Dashboard user={user} go={go} />;
       case 'pos': return <POS user={user} />;

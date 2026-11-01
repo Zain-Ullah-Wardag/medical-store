@@ -121,11 +121,15 @@ export const PERMISSIONS: Record<Role, string[]> = {
     'dashboard', 'pos', 'medicines.view', 'medicines.edit', 'inventory.view', 'inventory.adjust',
     'categories.edit', 'suppliers.view', 'suppliers.edit', 'purchases.view', 'purchases.create',
     'sales.view', 'sales.return', 'purchase.return', 'customers.view', 'customers.edit',
-    'ledgers.view', 'payments.create', 'expenses.view', 'expenses.create', 'cash.view', 'reports.view',
+    'ledgers.view', 'customerLedger.view', 'customers.export', 'suppliers.export', 'payments.create', 'expenses.view', 'expenses.create', 'cash.view', 'reports.view',
   ],
   cashier: [
     'dashboard.basic', 'pos', 'medicines.view', 'inventory.view', 'sales.view.own',
-    'customers.view', 'customers.edit', 'payments.create',
+    // Counter operations a cashier legitimately needs: register/fix customer
+    // contact details, view a CUSTOMER statement, receive payments.
+    // Deliberately NOT granted: supplier data ('suppliers.*', 'ledgers.view'
+    // is supplier-ledger), purchases, exports, adjustments, price override.
+    'customers.view', 'customers.edit', 'customerLedger.view', 'payments.create',
   ],
 };
 

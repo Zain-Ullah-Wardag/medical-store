@@ -12,7 +12,7 @@ export function Purchases({ user }: { user: SessionUser }) {
   const [form, setForm] = useState(false);
   const [detailId, setDetailId] = useState<number | null>(null);
   const canCreate = can(user.role, 'purchases.create');
-  const rows = [...db.purchases].sort((a, b) => b.id - a.id);
+  const rows = engine.listPurchases(user); // engine enforces purchases.view
   return (
     <Page title="Purchases" sub="Receive stock from suppliers. Stock increases exactly once per saved purchase."
       actions={canCreate && <Btn onClick={() => setForm(true)}>+ New purchase</Btn>}>
@@ -136,7 +136,7 @@ export function Suppliers({ user, goLedger }: { user: SessionUser; goLedger: (su
   return (
     <Page title="Suppliers" sub="Distributors and their outstanding balances."
       actions={<>
-        <ExportBtn filename="suppliers.csv" headerLine={`${db.settings.storeName} — Suppliers — ${new Date().toLocaleString('en-PK')}`} rows={rows.map(s2 => ({ Name: s2.name, Contact: s2.contactPerson, Phone: s2.phone, Address: s2.address, BalancePKR: engine.supplierBalance(s2.id) / 100, Meaning: engine.supplierBalance(s2.id) > 0 ? 'We owe them' : engine.supplierBalance(s2.id) < 0 ? 'Advance (supplier credit)' : 'Clear' }))} />
+        {can(user.role, 'suppliers.export') && <ExportBtn filename="suppliers.csv" headerLine={`${db.settings.storeName} — Suppliers — ${new Date().toLocaleString('en-PK')}`} rows={engine.supplierExportRows(user, q)} />}
         {canEdit && <Btn onClick={() => setForm('new')}>+ Add supplier</Btn>}
       </>}>
       <Card>

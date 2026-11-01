@@ -20,7 +20,7 @@ export function Customers({ user, goLedger }: { user: SessionUser; goLedger: (cu
   return (
     <Page title="Customers" sub="Credit (udhaar) accounts. Walk-in is the default counter customer and cannot take credit."
       actions={<>
-        <ExportBtn filename="customers.csv" headerLine={`${db.settings.storeName} — Customers — ${new Date().toLocaleString('en-PK')}`} rows={rows.map(c => ({ Name: c.name, Phone: c.phone, Address: c.address, BalancePKR: engine.customerBalance(c.id) / 100, Meaning: engine.customerBalance(c.id) > 0 ? 'Owes us' : engine.customerBalance(c.id) < 0 ? 'Advance held' : 'Clear' }))} />
+        {can(user.role, 'customers.export') && <ExportBtn filename="customers.csv" headerLine={`${db.settings.storeName} — Customers — ${new Date().toLocaleString('en-PK')}`} rows={engine.customerExportRows(user, q)} />}
         {can(user.role, 'customers.edit') && <Btn onClick={() => setForm('new')}>+ Add customer</Btn>}
       </>}>
       <Card>
@@ -70,7 +70,7 @@ function ReceiveForm({ user, cust, close }: { user: SessionUser; cust: Customer;
   const amtPaisa = toPaisa(amountRs || 0);
   const amountError = amountRs === '' ? 'Amount is required.' : amtPaisa <= 0 ? 'Amount must be greater than zero.' : '';
   const advance = amtPaisa - Math.max(0, balance);
-  const isWalkIn = cust.name.trim().toLowerCase().startsWith('walk-in');
+  const isWalkIn = cust.id === db.customers[0]?.id;
   return (
     <Modal title={`Receive payment — ${cust.name}`} onClose={close}>
       <p className="text-sm mb-3">{balance > 0 ? <>Outstanding (udhaar): <b>{money(balance)}</b></> : balance < 0 ? <>This customer already has an advance of <b>{money(-balance)}</b>.</> : 'No outstanding balance. Any payment recorded will be held as a customer advance.'}</p>
@@ -100,7 +100,7 @@ export function LedgerPage({ kind, preselect, user }: { kind: 'customer' | 'supp
   const [adjRs, setAdjRs] = useState(''); const [adjReason, setAdjReason] = useState('');
   return (
     <Page title={kind === 'customer' ? 'Customer Ledger' : 'Supplier Ledger'} sub="Running-balance statement built from recorded transactions only — balances are never typed in directly."
-      actions={<ExportBtn filename={`${kind}-ledger-${party?.name.replace(/[^a-z0-9]+/gi, '_') ?? partyId}.csv`} label="Export statement CSV" headerLine={`${db.settings.storeName} — ${kind === 'customer' ? 'Customer' : 'Supplier'} statement — ${party?.name ?? ''} — generated ${new Date().toLocaleString('en-PK')}`} rows={entries.map(e => ({ Date: e.dateTime, Type: ledgerTypeLabel(e.type), Reference: e.reference, DebitPKR: e.debitPaisa / 100, CreditPKR: e.creditPaisa / 100, RunningBalancePKR: e.runningPaisa / 100 }))} />}>
+      actions={can(user.role, kind === 'customer' ? 'customers.export' : 'suppliers.export') ? <ExportBtn filename={`${kind}-ledger-${party?.name.replace(/[^a-z0-9]+/gi, '_') ?? partyId}.csv`} label="Export statement CSV" headerLine={`${db.settings.storeName} — ${kind === 'customer' ? 'Customer' : 'Supplier'} statement — ${party?.name ?? ''} — generated ${new Date().toLocaleString('en-PK')}`} rows={engine.partyLedgerExportRows(user, kind, partyId).map(r => ({ ...r, Type: ledgerTypeLabel(String(r.Type)) }))} /> : undefined}>
       <div className="grid md:grid-cols-3 gap-3 mb-4">
         <Stat label={kind === 'customer' ? (balance < 0 ? 'Customer advance held' : 'Customer owes us') : (balance < 0 ? 'Supplier credit (advance paid)' : 'We owe supplier')} value={money(Math.abs(balance))} tone={balance > 0 ? 'amber' : 'teal'} hint={balance < 0 ? (kind === 'customer' ? 'Customer paid in advance — not sales income' : 'We overpaid/returned — use against future purchases') : undefined} />
         <Stat label="Opening balance" value={money(party?.openingBalancePaisa ?? 0)} tone="slate" />

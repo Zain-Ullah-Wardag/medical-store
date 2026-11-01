@@ -283,3 +283,47 @@ describe('cashier dashboard scoping (Priority 3)', () => {
     expect(eng.topSelling(todayStr(), todayStr(), 5, admin)[0].qty).toBe(5);
   });
 });
+
+describe('purchase access restrictions (Priority 4)', () => {
+  it('cashier cannot list or create purchases, nor pay suppliers; authorized roles can', () => {
+    const med = stockedMed();
+    const sup = eng.saveSupplier(admin, { name: 'DistCo' });
+    expect(() => eng.listPurchases(cashier)).toThrow(/Permission denied/);
+    expect(() => eng.createPurchase(cashier, { supplierId: sup.id, supplierInvoiceNo: '', date: todayStr(), discountPaisa: 0, chargesPaisa: 0, paidPaisa: 0, paymentMethod: 'Cash', idempotencyKey: 'p4-1', items: [{ medicineId: med.id, batchNo: 'BX', mfgDate: '', expiryDate: addDays(todayStr(), 365), qty: 5, costPaisa: toPaisa(20), sellPricePaisa: toPaisa(35) }] })).toThrow(/Permission denied/);
+    expect(() => eng.supplierPayment(cashier, { supplierId: sup.id, amountPaisa: toPaisa(10), method: 'Cash', reference: '', date: todayStr() })).toThrow(/Permission denied/);
+    eng.createPurchase(pharm, { supplierId: sup.id, supplierInvoiceNo: 'INV-9', date: todayStr(), discountPaisa: 0, chargesPaisa: 0, paidPaisa: 0, paymentMethod: 'Cash', idempotencyKey: 'p4-2', items: [{ medicineId: med.id, batchNo: 'BX', mfgDate: '', expiryDate: addDays(todayStr(), 365), qty: 5, costPaisa: toPaisa(20), sellPricePaisa: toPaisa(35) }] });
+    expect(eng.listPurchases(admin).length).toBe(1);
+    expect(eng.listPurchases(pharm).length).toBe(1);
+  });
+});
+
+describe('customer permissions & exports (Priorities 5-6)', () => {
+  it('cashier keeps counter operations: add customer, receive validated payment', () => {
+    const cust = eng.saveCustomer(cashier, { name: 'Counter Customer', openingBalancePaisa: toPaisa(200) });
+    eng.customerPayment(cashier, { customerId: cust.id, amountPaisa: toPaisa(50), method: 'Cash', reference: '', saleId: null, date: todayStr() });
+    expect(eng.customerBalance(cust.id)).toBe(toPaisa(150));
+  });
+  it('opening balance cannot be changed by direct engine call (customer or supplier)', () => {
+    const cust = eng.saveCustomer(admin, { name: 'Fixed Opening', openingBalancePaisa: toPaisa(500) });
+    expect(() => eng.saveCustomer(cashier, { id: cust.id, name: 'Fixed Opening', openingBalancePaisa: 0 })).toThrow(/Opening balance cannot be changed/);
+    eng.saveCustomer(cashier, { id: cust.id, name: 'Fixed Opening', phone: '0300-1', openingBalancePaisa: toPaisa(500) }); // same value edits fine
+    expect(eng.customerBalance(cust.id)).toBe(toPaisa(500));
+    const sup = eng.saveSupplier(admin, { name: 'FixedSup', openingBalancePaisa: toPaisa(700) });
+    expect(() => eng.saveSupplier(admin, { id: sup.id, name: 'FixedSup', openingBalancePaisa: 0 })).toThrow(/Opening balance cannot be changed/);
+  });
+  it('Walk-in payments require a reference at engine level', () => {
+    const walkInId = eng.db.customers[0].id;
+    expect(() => eng.customerPayment(admin, { customerId: walkInId, amountPaisa: toPaisa(100), method: 'Cash', reference: '', saleId: null, date: todayStr() })).toThrow(/shared counter record/);
+    eng.customerPayment(admin, { customerId: walkInId, amountPaisa: toPaisa(100), method: 'Cash', reference: 'Counter token #5', saleId: null, date: todayStr() });
+    expect(eng.customerBalance(walkInId)).toBe(toPaisa(-100));
+  });
+  it('customer/supplier/ledger exports are permission-gated in the engine', () => {
+    const cust = eng.saveCustomer(admin, { name: 'ExportMe' });
+    expect(() => eng.customerExportRows(cashier)).toThrow(/Permission denied/);
+    expect(() => eng.supplierExportRows(cashier)).toThrow(/Permission denied/);
+    expect(() => eng.partyLedgerExportRows(cashier, 'customer', cust.id)).toThrow(/Permission denied/);
+    expect(eng.customerExportRows(admin).length).toBeGreaterThan(0);
+    expect(eng.customerExportRows(pharm, 'exportme').length).toBe(1);
+    expect(eng.customerExportRows(admin, 'no-such-person').length).toBe(0);
+  });
+});
