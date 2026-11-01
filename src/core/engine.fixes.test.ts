@@ -343,3 +343,25 @@ describe('expense reversal history traceability (Priority 8)', () => {
     expect(eng.rangeStats(todayStr(), todayStr()).expenses).toBe(0);
   });
 });
+
+describe('bill discount validation (Priority 9)', () => {
+  it('percentage discount math: 10% of subtotal after line discounts; totals never go negative', () => {
+    const med = stockedMed(26, 35, 50);
+    // POS sends the COMPUTED paisa amount: 10% of (350 - 50 line discount) = 30
+    const sale = eng.createSale(cashier, { customerId: walkIn(), billDiscountPaisa: toPaisa(30), idempotencyKey: 'dp-1',
+      items: [{ medicineId: med.id, qty: 10, unitPricePaisa: toPaisa(35), discountPaisa: toPaisa(50) }],
+      payments: [{ method: 'Cash', amountPaisa: toPaisa(270) }] });
+    expect(sale.subtotalPaisa).toBe(toPaisa(350));
+    expect(sale.discountPaisa).toBe(toPaisa(80)); // 50 line + 30 bill
+    expect(sale.totalPaisa).toBe(toPaisa(270));
+    // discount beyond subtotal is rejected by the engine
+    expect(() => eng.createSale(admin, { customerId: walkIn(), billDiscountPaisa: toPaisa(9999), idempotencyKey: 'dp-2',
+      items: [{ medicineId: med.id, qty: 1, unitPricePaisa: toPaisa(35), discountPaisa: 0 }],
+      payments: [] })).toThrow(/discount cannot exceed/i);
+    // 100% discount -> total exactly 0, no negative amounts anywhere
+    const free = eng.createSale(admin, { customerId: walkIn(), billDiscountPaisa: toPaisa(35), idempotencyKey: 'dp-3',
+      items: [{ medicineId: med.id, qty: 1, unitPricePaisa: toPaisa(35), discountPaisa: 0 }], payments: [] });
+    expect(free.totalPaisa).toBe(0);
+    expect(eng.integrityCheck()).toEqual([]);
+  });
+});
