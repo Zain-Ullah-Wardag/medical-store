@@ -21,11 +21,10 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use rusqlite::Connection;
-use std::{fs, path::PathBuf, sync::Mutex};
+use std::{fs, path::PathBuf};
 use tauri::{AppHandle, Manager, State};
 
 struct DbPath(PathBuf);
-struct LogPath(Mutex<Option<PathBuf>>);
 
 fn open(db_path: &PathBuf) -> Result<Connection, String> {
     if let Some(parent) = db_path.parent() {
@@ -208,7 +207,6 @@ fn main() {
             let dir = app.path().app_data_dir().expect("app data dir");
             fs::create_dir_all(&dir).ok();
             app.manage(DbPath(dir.join("medstore.db")));
-            app.manage(LogPath(Mutex::new(None)));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

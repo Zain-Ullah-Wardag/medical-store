@@ -1,16 +1,17 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, lazy, Suspense } from 'react';
 import { engine, useDbVersion, loadSession, saveSession } from './lib/store';
 import { Btn, Field, inputCls, ToastHost, toast } from './components/ui';
 import type { SessionUser } from './core/types';
 import { can } from './core/types';
-import { Dashboard } from './pages/Dashboard';
+// Chart-heavy pages load on demand (recharts split out of the main chunk).
+const Dashboard = lazy(() => import('./pages/Dashboard').then(m => ({ default: m.Dashboard })));
 import { POS } from './pages/POS';
 import { Medicines, Inventory, Categories } from './pages/Catalog';
 import { Purchases, Suppliers } from './pages/Purchasing';
 import { SalesHistory, SalesReturns, PurchaseReturns } from './pages/SalesOps';
 import { Customers, LedgerPage } from './pages/Parties';
 import { Expenses, CashManagement } from './pages/Finance';
-import { Reports } from './pages/Reports';
+const Reports = lazy(() => import('./pages/Reports').then(m => ({ default: m.Reports })));
 import { Users, AuditLogs, Backup, SettingsPage } from './pages/Admin';
 
 type PageKey = 'dashboard' | 'pos' | 'medicines' | 'inventory' | 'categories' | 'suppliers' | 'purchases' | 'sales' | 'salesReturns' | 'purchaseReturns' | 'customers' | 'custLedger' | 'suppLedger' | 'expenses' | 'cash' | 'reports' | 'users' | 'audit' | 'backup' | 'settings';
@@ -153,7 +154,7 @@ export default function App() {
           <button onClick={doLogout} className="text-sm font-semibold text-red-500 hover:text-red-600">Logout</button>
         </header>
         {/* Only content scrolls */}
-        <main className="app-main flex-1 overflow-y-auto">{content}</main>
+        <main className="app-main flex-1 overflow-y-auto"><Suspense fallback={<div className="p-8 text-slate-400 text-sm">Loading…</div>}>{content}</Suspense></main>
       </div>
       <ToastHost />
     </div>
