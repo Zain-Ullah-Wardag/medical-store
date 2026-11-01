@@ -35,6 +35,11 @@ export function Reports({ user }: { user: SessionUser }) {
     return [...map.entries()].map(([name, v]) => ({ name, value: v / 100 }));
   }, [db, from, to]);
 
+  const slowRows = useMemo(() => db.medicines.filter(m => m.active).map(m => ({
+    m, stock: engine.saleableStock(m.id),
+    sold: items.filter(i => i.medicineId === m.id).reduce((x, i) => x + i.qty, 0),
+    value: db.batches.filter(b => b.medicineId === m.id && b.status === 'active' && !engine.isExpired(b)).reduce((x, b) => x + b.qtyRemaining * b.costPaisa, 0),
+  })).filter(r => r.stock > 0).sort((a, b) => a.sold - b.sold).slice(0, 25), [db, from, to]);
   const exportHeader = `${db.settings.storeName} — report — ${from} to ${to} — generated ${new Date().toLocaleString('en-PK')} (money columns in PKR)`;
   const reportTitles: Record<Rep, string> = { summary: 'Profit summary', byMedicine: 'Sales by medicine', byCategory: 'Sales by category', byCashier: 'Sales by cashier', byPayment: 'Receipts by payment method', inventory: 'Inventory valuation', expiry: 'Expiry report', outstanding: 'Outstanding balances', movements: 'Stock movements', returns: 'Returns', slow: 'Slow-moving medicines' };
 
@@ -97,22 +102,31 @@ export function Reports({ user }: { user: SessionUser }) {
       )}
 
       {rep === 'byCashier' && <Card title="Sales by cashier">{byCashier.length === 0 ? <Empty text="No sales in this period." /> : (
-        <Table head={['Cashier', 'Invoices', 'Revenue']}>{byCashier.map(r => <tr key={r.name}><td className="font-semibold">{r.name}</td><td>{r.invoices}</td><td>{money(r.revenue)}</td></tr>)}</Table>)}</Card>}
+        <Table head={['Cashier', 'Invoices', 'Revenue']}>{byCashier.map(r => <tr key={r.name}><td className="font-semibold">{r.name}</td><td>{r.invoices}</td><td>{money(r.revenue)}</td></tr>)}</Table>)}
+        <div className="mt-3"><ExportBtn filename="by-cashier-report.csv" headerLine={exportHeader} rows={byCashier.map(r => ({ Cashier: r.name, Invoices: r.invoices, RevenuePKR: r.revenue / 100 }))} /></div></Card>}
 
       {rep === 'byPayment' && <Card title="Receipts by payment method (at time of sale)">{byPayment.length === 0 ? <Empty text="No payments in this period." /> : (
         <div className="h-64"><ResponsiveContainer width="100%" height="100%"><PieChart>
           <Pie data={byPayment} dataKey="value" nameKey="name" label={({ name, value }: any) => `${name}: ${money((value ?? 0) * 100)}`}>
             {byPayment.map((_, i) => <Cell key={i} fill={COLORS[i % COLORS.length]} />)}
-          </Pie><Tooltip /></PieChart></ResponsiveContainer></div>)}</Card>}
+          </Pie><Tooltip /></PieChart></ResponsiveContainer></div>)}
+        <div className="mt-3"><ExportBtn filename="by-payment-report.csv" headerLine={exportHeader} rows={byPayment.map(r => ({ PaymentMethod: r.name, AmountPKR: r.value }))} /></div></Card>}
 
       {rep === 'inventory' && <Card title="Batch-wise inventory valuation (saleable, at cost)">
         <Table head={['Medicine', 'Batch', 'Expiry', 'Qty', 'Cost', 'Value']}>
           {db.batches.filter(b => b.status === 'active' && !engine.isExpired(b) && b.qtyRemaining > 0).map(b => <tr key={b.id}><td>{engine.medicine(b.medicineId).name}</td><td>{b.batchNo}</td><td>{fmtDate(b.expiryDate)}</td><td>{b.qtyRemaining}</td><td>{money(b.costPaisa)}</td><td className="font-semibold">{money(b.qtyRemaining * b.costPaisa)}</td></tr>)}
         </Table>
-        <div className="text-right font-bold mt-2">Total valuation: {money(engine.inventoryValuation())}</div>
+        <div className="flex items-center justify-between mt-2">
+          <ExportBtn filename="inventory-valuation-report.csv" headerLine={exportHeader} rows={[...db.batches.filter(b => b.status === 'active' && !engine.isExpired(b) && b.qtyRemaining > 0).map(b => ({ Medicine: engine.medicine(b.medicineId).name, Batch: b.batchNo, Expiry: b.expiryDate, Qty: b.qtyRemaining, CostPKR: b.costPaisa / 100, ValuePKR: (b.qtyRemaining * b.costPaisa) / 100 })), { Medicine: 'TOTAL', Batch: '', Expiry: '', Qty: '', CostPKR: '', ValuePKR: engine.inventoryValuation() / 100 }]} />
+          <div className="font-bold">Total valuation: {money(engine.inventoryValuation())}</div>
+        </div>
       </Card>}
 
-      {rep === 'expiry' && (
+      {rep === 'expiry' && (<>
+        <div className="mb-3"><ExportBtn filename="expiry-report.csv" headerLine={exportHeader} rows={[
+          ...engine.alerts().expired.map(b => ({ Status: 'Expired', Medicine: engine.medicine(b.medicineId).name, Batch: b.batchNo, Expiry: b.expiryDate, Qty: b.qtyRemaining, ValueAtCostPKR: (b.qtyRemaining * b.costPaisa) / 100 })),
+          ...engine.alerts().nearExpiry.map(b => ({ Status: 'Near-expiry', Medicine: engine.medicine(b.medicineId).name, Batch: b.batchNo, Expiry: b.expiryDate, Qty: b.qtyRemaining, ValueAtCostPKR: (b.qtyRemaining * b.costPaisa) / 100 })),
+        ]} /></div>
         <div className="grid md:grid-cols-2 gap-4">
           {([['Expired batches (never saleable)', engine.alerts().expired], ['Near-expiry batches', engine.alerts().nearExpiry]] as const).map(([title, list]) => (
             <Card key={title} title={title}>{list.length === 0 ? <Empty text="None." /> : (
@@ -121,9 +135,13 @@ export function Reports({ user }: { user: SessionUser }) {
               </Table>)}</Card>
           ))}
         </div>
-      )}
+      </>)}
 
-      {rep === 'outstanding' && (
+      {rep === 'outstanding' && (<>
+        <div className="mb-3"><ExportBtn filename="outstanding-report.csv" headerLine={exportHeader} rows={[
+          ...db.customers.filter(c => engine.customerBalance(c.id) > 0).map(c => ({ PartyType: 'Customer (owes us)', Name: c.name, Phone: c.phone, BalancePKR: engine.customerBalance(c.id) / 100 })),
+          ...db.suppliers.filter(x => engine.supplierBalance(x.id) > 0).map(x => ({ PartyType: 'Supplier (we owe)', Name: x.name, Phone: x.phone, BalancePKR: engine.supplierBalance(x.id) / 100 })),
+        ]} /></div>
         <div className="grid md:grid-cols-2 gap-4">
           <Card title="Customers who owe us"><Table head={['Customer', 'Phone', 'Balance']}>
             {db.customers.filter(c => engine.customerBalance(c.id) > 0).map(c => <tr key={c.id}><td>{c.name}</td><td>{c.phone}</td><td className="font-semibold">{money(engine.customerBalance(c.id))}</td></tr>)}
@@ -132,9 +150,13 @@ export function Reports({ user }: { user: SessionUser }) {
             {db.suppliers.filter(s => engine.supplierBalance(s.id) > 0).map(s => <tr key={s.id}><td>{s.name}</td><td>{s.phone}</td><td className="font-semibold">{money(engine.supplierBalance(s.id))}</td></tr>)}
           </Table></Card>
         </div>
-      )}
+      </>)}
 
-      {rep === 'returns' && (
+      {rep === 'returns' && (<>
+        <div className="mb-3"><ExportBtn filename="returns-report.csv" headerLine={exportHeader} rows={[
+          ...db.salesReturns.filter(r => inRange(r.dateTime)).map(r => ({ Type: 'Sales return', ReturnNo: r.returnNo, Date: r.dateTime, Reference: db.sales.find(x => x.id === r.saleId)?.invoiceNo ?? '', AmountPKR: r.refundPaisa / 100, MethodOrReason: `${r.method} — ${r.reason}` })),
+          ...db.purchaseReturns.filter(r => inRange(r.dateTime)).map(r => ({ Type: 'Purchase return', ReturnNo: r.returnNo, Date: r.dateTime, Reference: db.suppliers.find(x => x.id === r.supplierId)?.name ?? '', AmountPKR: r.totalPaisa / 100, MethodOrReason: r.reason })),
+        ]} /></div>
         <div className="grid md:grid-cols-2 gap-4">
           <Card title="Sales returns in period"><Table head={['Return', 'Invoice', 'Refund', 'Method']}>
             {db.salesReturns.filter(r => inRange(r.dateTime)).map(r => <tr key={r.id}><td>{r.returnNo}</td><td>{db.sales.find(s => s.id === r.saleId)?.invoiceNo}</td><td>{money(r.refundPaisa)}</td><td>{r.method}</td></tr>)}
@@ -143,7 +165,7 @@ export function Reports({ user }: { user: SessionUser }) {
             {db.purchaseReturns.filter(r => inRange(r.dateTime)).map(r => <tr key={r.id}><td>{r.returnNo}</td><td>{db.suppliers.find(s => s.id === r.supplierId)?.name}</td><td>{money(r.totalPaisa)}</td><td>{r.reason}</td></tr>)}
           </Table></Card>
         </div>
-      )}
+      </>)}
 
       {rep === 'movements' && <Card title="Inventory movement report">
         <Table head={['When', 'Medicine', 'Type', 'Qty', 'Reference', 'By', 'Reason']}>
@@ -154,13 +176,9 @@ export function Reports({ user }: { user: SessionUser }) {
 
       {rep === 'slow' && <Card title="Slow-moving medicines (in stock, few/no sales in period)">
         <Table head={['Medicine', 'Saleable stock', 'Qty sold in period', 'Saleable stock value (excl. expired)']}>
-          {db.medicines.filter(m => m.active).map(m => ({
-            m, stock: engine.saleableStock(m.id),
-            sold: items.filter(i => i.medicineId === m.id).reduce((s, i) => s + i.qty, 0),
-            value: db.batches.filter(b => b.medicineId === m.id && b.status === 'active' && !engine.isExpired(b)).reduce((s, b) => s + b.qtyRemaining * b.costPaisa, 0),
-          })).filter(r => r.stock > 0).sort((a, b) => a.sold - b.sold).slice(0, 25)
-            .map(r => <tr key={r.m.id}><td>{medLabel(r.m)}</td><td>{r.stock}</td><td>{r.sold}</td><td>{money(r.value)}</td></tr>)}
-        </Table></Card>}
+          {slowRows.map(r => <tr key={r.m.id}><td>{medLabel(r.m)}</td><td>{r.stock}</td><td>{r.sold}</td><td>{money(r.value)}</td></tr>)}
+        </Table>
+        <div className="mt-3"><ExportBtn filename="slow-moving-report.csv" headerLine={exportHeader} rows={slowRows.map(r => ({ Medicine: medLabel(r.m), SaleableStock: r.stock, QtySoldInPeriod: r.sold, SaleableStockValuePKR: r.value / 100 }))} /></div></Card>}
       <p className="text-xs text-slate-400 mt-3">Profit formulas and assumptions: see docs/FINANCIAL_RULES.md. Net operating profit excludes income tax, owner drawings and loan interest unless recorded as expenses.</p>
     </Page>
   );
