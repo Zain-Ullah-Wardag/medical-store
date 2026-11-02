@@ -155,36 +155,39 @@ export function PurchaseReturns({ user }: { user: SessionUser }) {
           <div className="mt-3">
             {batches.length === 0 ? <Empty text="No batches with stock for this supplier." /> : (
               <>
-              <p className="text-xs text-slate-400 mb-2">Tip: the medicine column (left) and Return qty column (right) stay visible while you scroll sideways.</p>
-              {/* Dedicated sticky-column table: medicine name frozen left, Return Qty frozen
-                  right, middle columns scroll. Scrolling is contained in this box so the
-                  page itself never scrolls horizontally. */}
+              <p className="text-xs text-slate-400 mb-2">Enter the quantity to return for each batch (0 = not returned). On narrow windows the table scrolls sideways inside this box.</p>
+              {/* Simple, reliable table: standard layout, fixed column widths via
+                  colgroup, horizontal scrolling contained in this box. No sticky
+                  columns/shadows — those rendered unreliably in WebView2. */}
               <div className="overflow-auto max-h-[520px] border border-slate-200 dark:border-slate-700 rounded-xl">
-                <table className="w-full min-w-[660px] text-sm border-separate border-spacing-0">
+                <table className="w-full min-w-[620px] text-sm border-collapse">
+                  <colgroup>
+                    <col style={{ width: '30%' }} /><col style={{ width: '13%' }} /><col style={{ width: '11%' }} />
+                    <col style={{ width: '13%' }} /><col style={{ width: '18%' }} /><col style={{ width: '15%' }} />
+                  </colgroup>
                   <thead>
-                    <tr className="text-left text-[11px] uppercase tracking-wide text-slate-400">
-                      <th className="sticky top-0 left-0 z-30 bg-slate-50 dark:bg-slate-800 py-2 px-3 font-semibold border-b border-r border-slate-200 dark:border-slate-700 w-[240px] min-w-[240px] max-w-[240px]">Medicine · batch</th>
-                      <th className="sticky top-0 z-20 bg-slate-50 dark:bg-slate-800 py-2 px-3 font-semibold border-b border-slate-200 dark:border-slate-700 whitespace-nowrap">Expiry</th>
-                      <th className="sticky top-0 z-20 bg-slate-50 dark:bg-slate-800 py-2 px-3 font-semibold border-b border-slate-200 dark:border-slate-700 whitespace-nowrap">Eligible qty</th>
-                      <th className="sticky top-0 z-20 bg-slate-50 dark:bg-slate-800 py-2 px-3 font-semibold border-b border-slate-200 dark:border-slate-700 whitespace-nowrap">Unit cost</th>
-                      <th className="sticky top-0 z-20 bg-slate-50 dark:bg-slate-800 py-2 px-3 font-semibold border-b border-slate-200 dark:border-slate-700 whitespace-nowrap">Return value</th>
-                      <th className="sticky top-0 right-0 z-30 bg-slate-50 dark:bg-slate-800 py-2 px-3 font-semibold border-b border-l border-slate-200 dark:border-slate-700 shadow-[-10px_0_10px_-10px_rgba(0,0,0,0.35)] w-[150px] min-w-[150px]">Return qty</th>
+                    <tr className="text-left text-[11px] uppercase tracking-wide text-slate-500 dark:text-slate-400 bg-slate-50 dark:bg-slate-700/40">
+                      <th className="py-2 px-3 font-semibold border-b border-slate-200 dark:border-slate-700">Medicine · batch</th>
+                      <th className="py-2 px-3 font-semibold border-b border-slate-200 dark:border-slate-700">Expiry</th>
+                      <th className="py-2 px-3 font-semibold border-b border-slate-200 dark:border-slate-700">Eligible qty</th>
+                      <th className="py-2 px-3 font-semibold border-b border-slate-200 dark:border-slate-700">Unit cost</th>
+                      <th className="py-2 px-3 font-semibold border-b border-slate-200 dark:border-slate-700">Return qty</th>
+                      <th className="py-2 px-3 font-semibold border-b border-slate-200 dark:border-slate-700">Return value</th>
                     </tr>
                   </thead>
                   <tbody>
                     {batches.map(b => { const err = qtyError(b.id, b.qtyRemaining); const q = qtys[b.id] ?? 0; return (
-                      <tr key={b.id} className="group">
-                        <td className="sticky left-0 z-10 bg-white dark:bg-slate-800 group-hover:bg-slate-50 dark:group-hover:bg-slate-700/40 py-2 px-3 align-top border-b border-r border-slate-100 dark:border-slate-700 w-[240px] min-w-[240px] max-w-[240px]">
-                          <div className="font-semibold leading-snug truncate" title={medLabel(engine.medicine(b.medicineId))}>{medLabel(engine.medicine(b.medicineId))}</div>
-                          <div className="text-xs text-slate-400 truncate" title={`Batch ${b.batchNo}`}>Batch {b.batchNo}{engine.isExpired(b) && <> · <Badge color="red">expired</Badge></>}</div>
+                      <tr key={b.id} className="hover:bg-slate-50 dark:hover:bg-slate-700/30">
+                        <td className="py-2 px-3 align-top border-b border-slate-100 dark:border-slate-700">
+                          <div className="font-semibold leading-snug break-words">{medLabel(engine.medicine(b.medicineId))}</div>
+                          <div className="text-xs text-slate-400 break-words">Batch {b.batchNo}{engine.isExpired(b) && <> · <Badge color="red">expired</Badge></>}</div>
                         </td>
                         <td className="py-2 px-3 align-top border-b border-slate-100 dark:border-slate-700 whitespace-nowrap">{fmtDate(b.expiryDate)}</td>
                         <td className="py-2 px-3 align-top border-b border-slate-100 dark:border-slate-700">{b.qtyRemaining}</td>
                         <td className="py-2 px-3 align-top border-b border-slate-100 dark:border-slate-700 whitespace-nowrap">{money(b.costPaisa)}</td>
-                        <td className="py-2 px-3 align-top border-b border-slate-100 dark:border-slate-700 whitespace-nowrap font-semibold">{q > 0 ? money(q * b.costPaisa) : '—'}</td>
-                        <td className="sticky right-0 z-10 bg-white dark:bg-slate-800 group-hover:bg-slate-50 dark:group-hover:bg-slate-700/40 py-2 px-3 align-top border-b border-l border-slate-200 dark:border-slate-700 shadow-[-10px_0_10px_-10px_rgba(0,0,0,0.35)] w-[150px] min-w-[150px]">
+                        <td className="py-2 px-3 align-top border-b border-slate-100 dark:border-slate-700">
                           <input type="number" min={0} max={b.qtyRemaining} step={1} inputMode="numeric" aria-label={`Return quantity for ${medLabel(engine.medicine(b.medicineId))} batch ${b.batchNo}`}
-                            className={inputCls + ' !w-[110px] text-center' + (err ? ' !border-red-500' : '')}
+                            className={inputCls + ' !w-[104px] text-center' + (err ? ' !border-red-500' : '')}
                             value={qtys[b.id] ?? 0}
                             onFocus={e => e.target.select()}
                             onWheel={e => (e.target as HTMLInputElement).blur()}
@@ -192,6 +195,7 @@ export function PurchaseReturns({ user }: { user: SessionUser }) {
                             onBlur={() => setQtys(prev => { const v = prev[b.id] ?? 0; return { ...prev, [b.id]: Math.max(0, Math.min(b.qtyRemaining, Number.isFinite(v) ? v : 0)) }; })} />
                           {err && <div className="text-[11px] text-red-500 mt-1 leading-tight">{err}</div>}
                         </td>
+                        <td className="py-2 px-3 align-top border-b border-slate-100 dark:border-slate-700 whitespace-nowrap font-semibold">{q > 0 ? money(q * b.costPaisa) : '—'}</td>
                       </tr>); })}
                   </tbody>
                 </table>
