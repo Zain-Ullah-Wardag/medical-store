@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { engine, uid } from '../lib/store';
 import { Page, Card, Btn, Modal, Field, inputCls, money, toast, fmtDate, Badge, Confirm, run, medLabel } from '../components/ui';
-import { toPaisa, percentOf } from '../core/money';
+import { toPaisa, percentOf, normalizePercentInput, parsePercent, billDiscountPaisa } from '../core/money';
 import type { Medicine, PackagingLevel, Sale, SessionUser } from '../core/types';
 import { can } from '../core/types';
 import { Receipt } from '../components/Receipt';
@@ -138,11 +138,7 @@ export function POS({ user }: { user: SessionUser }) {
   const lineDisc = cart.reduce((s, l) => s + l.discountPaisa, 0);
   // Bill discount: fixed Rs OR percentage of (subtotal − line discounts).
   // The invoice always records the computed paisa amount.
-  const billDiscPctRaw = parseFloat(billDiscRs) || 0;
-  const billDiscPct = Math.max(0, Math.min(100, billDiscPctRaw));
-  const billDisc = billDiscType === 'pct'
-    ? percentOf(Math.max(0, subtotal - lineDisc), billDiscPct)
-    : toPaisa(billDiscRs || 0);
+  const billDisc = billDiscountPaisa(billDiscType, billDiscRs, subtotal - lineDisc);
   const discountTotal = lineDisc + billDisc;
   const tax = percentOf(Math.max(0, subtotal - discountTotal), db.settings.taxRatePct);
   const total = Math.max(0, subtotal - discountTotal) + tax;
@@ -282,14 +278,17 @@ export function POS({ user }: { user: SessionUser }) {
                 <div className="flex items-center gap-1.5">
                   <div className="flex rounded-lg overflow-hidden border border-slate-200 dark:border-slate-600 text-xs font-bold">
                     <button type="button" onClick={() => setBillDiscType('fixed')} className={`px-2 py-1.5 ${billDiscType === 'fixed' ? 'bg-teal-600 text-white' : 'bg-white dark:bg-slate-700'}`}>Rs</button>
-                    <button type="button" onClick={() => setBillDiscType('pct')} className={`px-2 py-1.5 ${billDiscType === 'pct' ? 'bg-teal-600 text-white' : 'bg-white dark:bg-slate-700'}`}>%</button>
+                    <button type="button" onClick={() => { setBillDiscType('pct'); setBillDiscRs(v => normalizePercentInput(v)); }} className={`px-2 py-1.5 ${billDiscType === 'pct' ? 'bg-teal-600 text-white' : 'bg-white dark:bg-slate-700'}`}>%</button>
                   </div>
                   <input className={inputCls + ' !w-24 text-right'} type="number" min={0} max={billDiscType === 'pct' ? 100 : undefined} step={billDiscType === 'pct' ? '0.5' : undefined}
-                    value={billDiscRs} onChange={e => setBillDiscRs(e.target.value)} placeholder="0"
-                    title={billDiscType === 'pct' ? 'Percentage of (subtotal − line discounts)' : 'Fixed discount in rupees'} />
+                    value={billDiscRs}
+                    onChange={e => setBillDiscRs(billDiscType === 'pct' ? normalizePercentInput(e.target.value) : e.target.value)}
+                    onBlur={() => { if (billDiscType === 'pct') setBillDiscRs(v => v === '' ? '' : String(parsePercent(v))); }}
+                    placeholder="0"
+                    title={billDiscType === 'pct' ? 'Percentage (0–100) of (subtotal − line discounts)' : 'Fixed discount in rupees'} />
                 </div>
               </div>
-              {billDiscType === 'pct' && billDiscRs !== '' && <div className="flex justify-between text-xs text-slate-400"><span>{billDiscPct}% of {money(Math.max(0, subtotal - lineDisc))}</span><span>= {money(billDisc)}{billDiscPctRaw > 100 ? ' (capped at 100%)' : ''}</span></div>}
+              {billDiscType === 'pct' && billDiscRs !== '' && <div className="flex justify-between text-xs text-slate-400"><span>{parsePercent(billDiscRs)}% of {money(Math.max(0, subtotal - lineDisc))}</span><span>= {money(billDisc)}</span></div>}
               <div className="flex justify-between"><span>Total discount</span><span className="text-red-500">−{money(discountTotal)}</span></div>
               {db.settings.taxRatePct > 0 && <div className="flex justify-between"><span>Tax ({db.settings.taxRatePct}%)</span><span>{money(tax)}</span></div>}
               <div className="flex justify-between text-lg font-bold border-t border-slate-200 dark:border-slate-600 pt-2"><span>Total payable</span><span>{money(total)}</span></div>

@@ -48,3 +48,31 @@ export const addDays = (dateStr: string, days: number): string => {
 };
 export const daysBetween = (from: string, to: string): number =>
   Math.round((new Date(to + 'T00:00:00').getTime() - new Date(from + 'T00:00:00').getTime()) / 86400000);
+/**
+ * Normalize a percentage input string so the FIELD ITSELF only ever shows a
+ * value in [0, 100] (not just the calculation). Empty stays empty (field
+ * cleared); partial entries like "10." are preserved while typing; complete
+ * out-of-range numbers clamp ("110" -> "100", "-10" -> "0").
+ */
+export const normalizePercentInput = (raw: string): string => {
+  if (raw === '' || raw === '-') return raw === '-' ? '' : raw;
+  const n = parseFloat(raw);
+  if (Number.isNaN(n)) return '';
+  if (n > 100) return '100';
+  if (n < 0) return '0';
+  return raw;
+};
+/** Parse a (possibly un-normalized) percentage string to a number in [0,100]. */
+export const parsePercent = (raw: string): number => {
+  const n = parseFloat(raw);
+  return Number.isNaN(n) ? 0 : Math.max(0, Math.min(100, n));
+};
+/** Bill discount in paisa for either input mode. Percentage applies to the
+ *  base amount (subtotal − line discounts); fixed parses rupees. Never
+ *  negative, never above the base. */
+export const billDiscountPaisa = (type: 'fixed' | 'pct', raw: string, basePaisa: number): number => {
+  const base = Math.max(0, basePaisa);
+  if (type === 'pct') return percentOf(base, parsePercent(raw));
+  return Math.max(0, Math.min(base, toPaisa(raw || 0)));
+};
+
