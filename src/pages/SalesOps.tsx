@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react';
 import { engine } from '../lib/store';
 import { Page, Card, Btn, Modal, Field, inputCls, money, Table, Badge, Empty, run, fmtDate, fmtDateTime, ExportBtn, medLabel, DetailRow, Tabs } from '../components/ui';
-import { todayStr } from '../core/money';
+import { todayStr, addDays, localDateOf } from '../core/money';
 import type { Sale, SessionUser } from '../core/types';
 import { can } from '../core/types';
 import { Receipt } from '../components/Receipt';
@@ -273,6 +273,43 @@ export function PurchaseReturns({ user }: { user: SessionUser }) {
   const hasQtyError = batches.some(b => qtyError(b.id, b.qtyRemaining));
   const selected = batches.filter(b => (qtys[b.id] ?? 0) > 0);
   const returnTotal = selected.reduce((sum, b) => sum + (qtys[b.id] ?? 0) * b.costPaisa, 0);
+  // --- Tabs & filters (view-only; quantities/reason live above and survive tab switches) ---
+  const [prTab, setPrTab] = useState<'new' | 'history'>('new');
+  const [batchQuery, setBatchQuery] = useState('');
+  const [expiryFilter, setExpiryFilter] = useState<'all' | 'expired' | 'near' | 'active'>('all');
+  const warnTo = addDays(todayStr(), db.settings.expiryWarnDays);
+  const expiryBucket = (b: (typeof batches)[number]): 'expired' | 'near' | 'active' =>
+    engine.isExpired(b) ? 'expired' : b.expiryDate <= warnTo ? 'near' : 'active';
+  const bucketCounts = {
+    all: batches.length,
+    expired: batches.filter(b => expiryBucket(b) === 'expired').length,
+    near: batches.filter(b => expiryBucket(b) === 'near').length,
+    active: batches.filter(b => expiryBucket(b) === 'active').length,
+  };
+  const visibleBatches = batches.filter(b => {
+    if (expiryFilter !== 'all' && expiryBucket(b) !== expiryFilter) return false;
+    const q = batchQuery.trim().toLowerCase();
+    return !q || engine.medicine(b.medicineId).name.toLowerCase().includes(q) || b.batchNo.toLowerCase().includes(q);
+  });
+  const hiddenSelected = selected.filter(b => !visibleBatches.some(v => v.id === b.id)).length;
+  // --- History filters ---
+  const [histQuery, setHistQuery] = useState('');
+  const [histSupplier, setHistSupplier] = useState('');
+  const [histFrom, setHistFrom] = useState('');
+  const [histTo, setHistTo] = useState('');
+  const allReturns = [...db.purchaseReturns].reverse();
+  const histRows = allReturns.filter(r => {
+    if (histSupplier && r.supplierId !== Number(histSupplier)) return false;
+    const d = localDateOf(r.dateTime);
+    if (histFrom && d < histFrom) return false;
+    if (histTo && d > histTo) return false;
+    const q = histQuery.trim().toLowerCase();
+    return !q || r.returnNo.toLowerCase().includes(q)
+      || (db.suppliers.find(x => x.id === r.supplierId)?.name ?? '').toLowerCase().includes(q)
+      || r.reason.toLowerCase().includes(q);
+  });
+  const histFiltersActive = !!(histQuery || histSupplier || histFrom || histTo);
+  const clearHistFilters = () => { setHistQuery(''); setHistSupplier(''); setHistFrom(''); setHistTo(''); };
   const submit = () => {
     const ok = run(() => engine.createPurchaseReturn(user, {
       supplierId: Number(supplierId), purchaseId: null, reason,
@@ -282,16 +319,34 @@ export function PurchaseReturns({ user }: { user: SessionUser }) {
   };
   return (
     <Page title="Purchase Returns" sub="Send eligible stock back to the supplier. The original purchase is preserved; the supplier balance is reduced by batch cost.">
-      <div className="grid lg:grid-cols-5 gap-4 items-start">
-        <Card title="New purchase return" className="lg:col-span-3">
-          <Field label="Supplier"><select className={inputCls} value={supplierId} onChange={e => { setSupplierId(e.target.value); setQtys({}); }}>
-            {db.suppliers.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}</select></Field>
+      <Tabs value={prTab} onChange={setPrTab} tabs={[
+        { key: 'new', label: '📤 New Purchase Return' },
+        { key: 'history', label: '🕘 Return History', count: allReturns.length },
+      ]} />
+      {prTab === 'new' && (
+        <Card title="New purchase return">
+          <div className="grid md:grid-cols-3 gap-3">
+            <Field label="Supplier"><select className={inputCls} value={supplierId} onChange={e => { setSupplierId(e.target.value); setQtys({}); }}>
+              {db.suppliers.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}</select></Field>
+            <Field label="Search medicine or batch"><input className={inputCls} placeholder="e.g. Panadol or PN-2401…" value={batchQuery} onChange={e => setBatchQuery(e.target.value)} /></Field>
+            <Field label="Expiry status"><select className={inputCls} value={expiryFilter} onChange={e => setExpiryFilter(e.target.value as any)}>
+              <option value="all">All ({bucketCounts.all})</option>
+              <option value="expired">⛔ Expired ({bucketCounts.expired})</option>
+              <option value="near">⏳ Near Expiry ({bucketCounts.near})</option>
+              <option value="active">✅ Active ({bucketCounts.active})</option>
+            </select></Field>
+          </div>
           <div className="mt-3">
-            {batches.length === 0 ? <Empty text="No batches with stock for this supplier." /> : (
+            {batches.length === 0 ? <Empty text="No batches with stock for this supplier." /> : visibleBatches.length === 0 ? (
+              <div>
+                <Empty text="No batches match the current search / expiry filter." />
+                <div className="text-center"><Btn kind="ghost" onClick={() => { setBatchQuery(''); setExpiryFilter('all'); }}>Clear search & filter</Btn></div>
+              </div>
+            ) : (
               <>
-              <p className="text-xs text-slate-400 mb-2">Enter the quantity to return on each batch card (0 = not returned). Selected batches are highlighted.</p>
-              <div className="grid sm:grid-cols-2 gap-3 max-h-[560px] overflow-y-auto pr-0.5">
-                {batches.map(b => { const err = qtyError(b.id, b.qtyRemaining); const q = qtys[b.id] ?? 0; const sel = q > 0; const med = engine.medicine(b.medicineId); return (
+              <p className="text-xs text-slate-400 mb-2">Showing {visibleBatches.length} of {batches.length} batches. Enter the quantity to return on each batch card (0 = not returned). Selected batches are highlighted.</p>
+              <div className="grid sm:grid-cols-2 xl:grid-cols-3 gap-3 max-h-[560px] overflow-y-auto pr-0.5">
+                {visibleBatches.map(b => { const err = qtyError(b.id, b.qtyRemaining); const q = qtys[b.id] ?? 0; const sel = q > 0; const med = engine.medicine(b.medicineId); return (
                   <div key={b.id} className={`border rounded-xl p-3 transition ${sel ? 'border-teal-500 ring-1 ring-teal-500 bg-teal-50/70 dark:bg-teal-900/20' : 'border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800'}`}>
                     <div className="flex items-start justify-between gap-2">
                       <div className="font-semibold leading-snug break-words">{medLabel(med)}</div>
@@ -323,7 +378,7 @@ export function PurchaseReturns({ user }: { user: SessionUser }) {
                   </div>); })}
               </div>
               <div className="flex flex-wrap justify-between gap-2 mt-2 text-sm">
-                <span className="text-slate-500">{selected.length} batch(es) selected</span>
+                <span className="text-slate-500">{selected.length} batch(es) selected{hiddenSelected > 0 ? ` (${hiddenSelected} hidden by the current filter — still included)` : ''}</span>
                 <span>Total return value: <b>{money(returnTotal)}</b> <span className="text-slate-400">(at batch cost)</span></span>
               </div>
               </>
@@ -333,15 +388,55 @@ export function PurchaseReturns({ user }: { user: SessionUser }) {
           {can(user.role, 'purchase.return') && <Btn className="w-full mt-4" disabled={hasQtyError || selected.length === 0} onClick={submit}>Record purchase return{selected.length > 0 ? ` (${money(returnTotal)})` : ''}</Btn>}
           {hasQtyError && <p className="text-xs text-red-500 mt-1.5">Fix the highlighted quantities before recording the return.</p>}
         </Card>
-        <Card title="Return history" className="lg:col-span-2">
-          {db.purchaseReturns.length === 0 ? <Empty text="No purchase returns yet." /> : (
-            <Table head={['Return', 'Supplier', 'When', 'Value', 'Reason', '']}>
-              {[...db.purchaseReturns].reverse().map(r => <tr key={r.id}><td className="font-semibold">{r.returnNo}</td><td>{db.suppliers.find(s => s.id === r.supplierId)?.name}</td><td>{fmtDateTime(r.dateTime)}</td><td className="font-semibold">{money(r.totalPaisa)}</td><td>{r.reason}</td>
-                <td><Btn kind="soft" onClick={() => setDetailId(r.id)}>View</Btn></td></tr>)}
-            </Table>
-          )}
-        </Card>
-      </div>
+      )}
+
+      {prTab === 'history' && (
+        <div className="space-y-4">
+          <Card title="Find a return">
+            <div className="grid md:grid-cols-2 xl:grid-cols-4 gap-3">
+              <Field label="Search (return ID, supplier or reason)"><input className={inputCls} placeholder="e.g. PR-000001, Medinova, damaged…" value={histQuery} onChange={e => setHistQuery(e.target.value)} /></Field>
+              <Field label="Supplier"><select className={inputCls} value={histSupplier} onChange={e => setHistSupplier(e.target.value)}>
+                <option value="">All Suppliers</option>
+                {db.suppliers.map(x => <option key={x.id} value={x.id}>{x.name}</option>)}
+              </select></Field>
+              <Field label="From date"><input type="date" className={inputCls} value={histFrom} onChange={e => setHistFrom(e.target.value)} /></Field>
+              <Field label="To date"><input type="date" className={inputCls} value={histTo} onChange={e => setHistTo(e.target.value)} /></Field>
+            </div>
+            <div className="flex flex-wrap items-center justify-between gap-2 mt-3">
+              <span className="text-sm text-slate-500">{histRows.length} of {allReturns.length} return(s){histFiltersActive ? ' match the current filters' : ''}</span>
+              <Btn kind="ghost" disabled={!histFiltersActive} onClick={clearHistFilters}>✕ Clear Filters</Btn>
+            </div>
+          </Card>
+
+          {allReturns.length === 0 ? <Card><Empty text="No purchase returns recorded yet." /></Card>
+            : histRows.length === 0 ? (
+              <Card>
+                <Empty text="No purchase returns match the current search and filters." />
+                <div className="text-center pb-2"><Btn kind="ghost" onClick={clearHistFilters}>✕ Clear Filters</Btn></div>
+              </Card>
+            ) : (
+              <div className="grid sm:grid-cols-2 xl:grid-cols-3 gap-3">
+                {histRows.map(r => (
+                  <div key={r.id} className="border border-slate-200 dark:border-slate-700 rounded-xl p-3 bg-white dark:bg-slate-800 flex flex-col">
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="font-bold">{r.returnNo}</div>
+                      <Btn kind="soft" onClick={() => setDetailId(r.id)}>View Details</Btn>
+                    </div>
+                    <div className="mt-1.5 flex-1">
+                      <DetailRow label="Supplier">{db.suppliers.find(x => x.id === r.supplierId)?.name ?? '—'}</DetailRow>
+                      <DetailRow label="Date">{fmtDateTime(r.dateTime)}</DetailRow>
+                      <DetailRow label="Total value"><span className="font-bold">{money(r.totalPaisa)}</span></DetailRow>
+                      <DetailRow label="Recorded by">{db.users.find(u => u.id === r.userId)?.fullName ?? '—'}</DetailRow>
+                    </div>
+                    <div className="mt-2 pt-2 border-t border-dashed border-slate-200 dark:border-slate-600 text-sm">
+                      <span className="text-slate-400 text-xs uppercase tracking-wide font-semibold">Reason</span>
+                      <div className="break-words mt-0.5">{r.reason}</div>
+                    </div>
+                  </div>))}
+              </div>
+            )}
+        </div>
+      )}
       {detailId !== null && (() => {
         const r = db.purchaseReturns.find(x => x.id === detailId)!;
         const items = db.purchaseReturnItems.filter(i => i.returnId === r.id);
