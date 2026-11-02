@@ -81,9 +81,9 @@ export function Dashboard({ user, go }: { user: SessionUser; go: (p: string) => 
           )}
           <button className="mt-3 text-teal-600 text-sm font-semibold" onClick={() => go('inventory')}>Open Inventory →</button>
         </Card>)}
-        <Card title={ownOnly ? 'Your recent sales' : 'Recent sales'}>
+        <Card title={ownOnly ? 'Your recent sales' : 'Recent sales'} className={!business ? (canPurchases ? 'lg:col-span-2' : 'lg:col-span-3') : ''}>
           {recentSales.length === 0 ? <Empty text="No sales yet." /> : (
-            <Table head={['Invoice', 'Time', 'Total']}>{recentSales.map(s => (
+            <Table minW={0} head={['Invoice', 'Time', 'Total']}>{recentSales.map(s => (
               <tr key={s.id}><td>{s.invoiceNo}</td><td>{fmtDateTime(s.dateTime)}</td><td className="font-semibold">{money(s.totalPaisa)}</td></tr>
             ))}</Table>
           )}
