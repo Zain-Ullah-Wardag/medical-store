@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react';
 import { PieChart, Pie, Cell, Tooltip, ResponsiveContainer, BarChart, Bar, XAxis, YAxis, CartesianGrid } from 'recharts';
 import { engine } from '../lib/store';
-import { Page, Card, Btn, inputCls, money, Table, Empty, fmtDate, Stat, ExportBtn, Badge, medLabel } from '../components/ui';
+import { Page, Card, Btn, Modal, inputCls, money, Table, Empty, fmtDate, fmtDateTime, Stat, ExportBtn, Badge, medLabel, Tabs, DetailRow } from '../components/ui';
 import { todayStr, addDays, localDateOf } from '../core/money';
 import type { SessionUser } from '../core/types';
 
@@ -11,6 +11,11 @@ type Rep = 'summary' | 'byMedicine' | 'byCategory' | 'byCashier' | 'byPayment' |
 export function Reports({ user }: { user: SessionUser }) {
   const db = engine.db;
   const [rep, setRep] = useState<Rep>('summary');
+  const [expiryTab, setExpiryTab] = useState<'expired' | 'near'>('expired');
+  const [outTab, setOutTab] = useState<'customers' | 'suppliers'>('customers');
+  const [retTab, setRetTab] = useState<'sales' | 'purchase'>('sales');
+  const [srDetail, setSrDetail] = useState<number | null>(null);
+  const [prDetail, setPrDetail] = useState<number | null>(null);
   const [from, setFrom] = useState(todayStr().slice(0, 8) + '01');
   const [to, setTo] = useState(todayStr());
   const stats = useMemo(() => engine.rangeStats(from, to), [from, to, db]);
@@ -127,14 +132,30 @@ export function Reports({ user }: { user: SessionUser }) {
           ...engine.alerts().expired.map(b => ({ Status: 'Expired', Medicine: engine.medicine(b.medicineId).name, Batch: b.batchNo, Expiry: b.expiryDate, Qty: b.qtyRemaining, ValueAtCostPKR: (b.qtyRemaining * b.costPaisa) / 100 })),
           ...engine.alerts().nearExpiry.map(b => ({ Status: 'Near-expiry', Medicine: engine.medicine(b.medicineId).name, Batch: b.batchNo, Expiry: b.expiryDate, Qty: b.qtyRemaining, ValueAtCostPKR: (b.qtyRemaining * b.costPaisa) / 100 })),
         ]} /></div>
-        <div className="grid md:grid-cols-2 gap-4">
-          {([['Expired batches (never saleable)', engine.alerts().expired], ['Near-expiry batches', engine.alerts().nearExpiry]] as const).map(([title, list]) => (
-            <Card key={title} title={title}>{list.length === 0 ? <Empty text="None." /> : (
-              <Table head={['Medicine', 'Batch', 'Expiry', 'Qty', 'Value at cost']}>
-                {list.map(b => <tr key={b.id}><td>{engine.medicine(b.medicineId).name}</td><td>{b.batchNo}</td><td><Badge color={title.startsWith('Expired') ? 'red' : 'amber'}>{fmtDate(b.expiryDate)}</Badge></td><td>{b.qtyRemaining}</td><td>{money(b.qtyRemaining * b.costPaisa)}</td></tr>)}
-              </Table>)}</Card>
-          ))}
-        </div>
+        <Tabs value={expiryTab} onChange={setExpiryTab} tabs={[
+          { key: 'expired', label: '⛔ Expired Batches', count: engine.alerts().expired.length },
+          { key: 'near', label: '⏳ Near-Expiry Batches', count: engine.alerts().nearExpiry.length },
+        ]} />
+        {(() => { const list = expiryTab === 'expired' ? engine.alerts().expired : engine.alerts().nearExpiry; return list.length === 0
+          ? <Card><Empty text={expiryTab === 'expired' ? 'No expired batches. Expired batches are always blocked from sale.' : 'No batches near expiry.'} /></Card>
+          : (
+          <div className="grid sm:grid-cols-2 xl:grid-cols-3 gap-3">
+            {list.map(b => { const m = engine.medicine(b.medicineId); return (
+              <div key={b.id} className="border border-slate-200 dark:border-slate-700 rounded-xl p-3 bg-white dark:bg-slate-800">
+                <div className="flex items-start justify-between gap-2">
+                  <div className="font-semibold leading-snug break-words">{medLabel(m)}</div>
+                  <Badge color={expiryTab === 'expired' ? 'red' : 'amber'}>{expiryTab === 'expired' ? 'Expired — not saleable' : 'Near expiry'}</Badge>
+                </div>
+                <div className="mt-1.5">
+                  <DetailRow label="Batch">{b.batchNo}</DetailRow>
+                  <DetailRow label="Expiry date">{fmtDate(b.expiryDate)}</DetailRow>
+                  <DetailRow label="Remaining qty">{b.qtyRemaining} {m.unit}</DetailRow>
+                  <DetailRow label="Unit cost">{money(b.costPaisa)}</DetailRow>
+                  <DetailRow label="Stock value">{money(b.qtyRemaining * b.costPaisa)}</DetailRow>
+                  <DetailRow label="Stock status">{b.status.replace('_', ' ')}</DetailRow>
+                </div>
+              </div>); })}
+          </div>); })()}
       </>)}
 
       {rep === 'outstanding' && (<>
@@ -142,14 +163,49 @@ export function Reports({ user }: { user: SessionUser }) {
           ...db.customers.filter(c => engine.customerBalance(c.id) > 0).map(c => ({ PartyType: 'Customer (owes us)', Name: c.name, Phone: c.phone, BalancePKR: engine.customerBalance(c.id) / 100 })),
           ...db.suppliers.filter(x => engine.supplierBalance(x.id) > 0).map(x => ({ PartyType: 'Supplier (we owe)', Name: x.name, Phone: x.phone, BalancePKR: engine.supplierBalance(x.id) / 100 })),
         ]} /></div>
-        <div className="grid md:grid-cols-2 gap-4">
-          <Card title="Customers who owe us"><Table head={['Customer', 'Phone', 'Balance']}>
-            {db.customers.filter(c => engine.customerBalance(c.id) > 0).map(c => <tr key={c.id}><td>{c.name}</td><td>{c.phone}</td><td className="font-semibold">{money(engine.customerBalance(c.id))}</td></tr>)}
-          </Table></Card>
-          <Card title="Suppliers we owe"><Table head={['Supplier', 'Phone', 'Balance']}>
-            {db.suppliers.filter(s => engine.supplierBalance(s.id) > 0).map(s => <tr key={s.id}><td>{s.name}</td><td>{s.phone}</td><td className="font-semibold">{money(engine.supplierBalance(s.id))}</td></tr>)}
-          </Table></Card>
-        </div>
+        <Tabs value={outTab} onChange={setOutTab} tabs={[
+          { key: 'customers', label: '👥 Customers Who Owe Us', count: db.customers.filter(c => engine.customerBalance(c.id) > 0).length },
+          { key: 'suppliers', label: '🚚 Suppliers We Owe', count: db.suppliers.filter(x => engine.supplierBalance(x.id) !== 0).length },
+        ]} />
+        {outTab === 'customers' && (
+          db.customers.filter(c => engine.customerBalance(c.id) > 0).length === 0
+            ? <Card><Empty text="No customer owes us anything right now." /></Card>
+            : <div className="grid sm:grid-cols-2 xl:grid-cols-3 gap-3">
+                {db.customers.filter(c => engine.customerBalance(c.id) > 0).map(c => (
+                  <div key={c.id} className="border border-slate-200 dark:border-slate-700 rounded-xl p-3 bg-white dark:bg-slate-800">
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="font-semibold break-words">{c.name}</div>
+                      <Badge color="amber">Owes us</Badge>
+                    </div>
+                    <div className="mt-1.5">
+                      <DetailRow label="Phone">{c.phone || '—'}</DetailRow>
+                      <DetailRow label="Address">{c.address || '—'}</DetailRow>
+                      <DetailRow label="Ledger entries">{engine.partyLedger('customer', c.id).length}</DetailRow>
+                      <DetailRow label="Outstanding balance"><span className="font-bold">{money(engine.customerBalance(c.id))}</span></DetailRow>
+                    </div>
+                  </div>))}
+              </div>
+        )}
+        {outTab === 'suppliers' && (
+          db.suppliers.filter(x => engine.supplierBalance(x.id) !== 0).length === 0
+            ? <Card><Empty text="No supplier balances outstanding." /></Card>
+            : <div className="grid sm:grid-cols-2 xl:grid-cols-3 gap-3">
+                {db.suppliers.filter(x => engine.supplierBalance(x.id) !== 0).map(x => { const bal = engine.supplierBalance(x.id); return (
+                  <div key={x.id} className="border border-slate-200 dark:border-slate-700 rounded-xl p-3 bg-white dark:bg-slate-800">
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="font-semibold break-words">{x.name}</div>
+                      {bal > 0 ? <Badge color="amber">We owe them</Badge> : <Badge color="blue">Supplier credit</Badge>}
+                    </div>
+                    <div className="mt-1.5">
+                      <DetailRow label="Contact">{x.contactPerson || '—'}{x.phone ? ` · ${x.phone}` : ''}</DetailRow>
+                      <DetailRow label="Ledger entries">{engine.partyLedger('supplier', x.id).length}</DetailRow>
+                      {bal > 0
+                        ? <DetailRow label="Outstanding payable"><span className="font-bold">{money(bal)}</span></DetailRow>
+                        : <DetailRow label="Supplier credit (advance)"><span className="font-bold">{money(-bal)}</span></DetailRow>}
+                    </div>
+                  </div>); })}
+              </div>
+        )}
       </>)}
 
       {rep === 'returns' && (<>
@@ -157,14 +213,51 @@ export function Reports({ user }: { user: SessionUser }) {
           ...db.salesReturns.filter(r => inRange(r.dateTime)).map(r => ({ Type: 'Sales return', ReturnNo: r.returnNo, Date: r.dateTime, Reference: db.sales.find(x => x.id === r.saleId)?.invoiceNo ?? '', AmountPKR: r.refundPaisa / 100, MethodOrReason: `${r.method} — ${r.reason}` })),
           ...db.purchaseReturns.filter(r => inRange(r.dateTime)).map(r => ({ Type: 'Purchase return', ReturnNo: r.returnNo, Date: r.dateTime, Reference: db.suppliers.find(x => x.id === r.supplierId)?.name ?? '', AmountPKR: r.totalPaisa / 100, MethodOrReason: r.reason })),
         ]} /></div>
-        <div className="grid md:grid-cols-2 gap-4">
-          <Card title="Sales returns in period"><Table head={['Return', 'Invoice', 'Refund', 'Method']}>
-            {db.salesReturns.filter(r => inRange(r.dateTime)).map(r => <tr key={r.id}><td>{r.returnNo}</td><td>{db.sales.find(s => s.id === r.saleId)?.invoiceNo}</td><td>{money(r.refundPaisa)}</td><td>{r.method}</td></tr>)}
-          </Table></Card>
-          <Card title="Purchase returns in period"><Table head={['Return', 'Supplier', 'Value', 'Reason']}>
-            {db.purchaseReturns.filter(r => inRange(r.dateTime)).map(r => <tr key={r.id}><td>{r.returnNo}</td><td>{db.suppliers.find(s => s.id === r.supplierId)?.name}</td><td>{money(r.totalPaisa)}</td><td>{r.reason}</td></tr>)}
-          </Table></Card>
-        </div>
+        <Tabs value={retTab} onChange={setRetTab} tabs={[
+          { key: 'sales', label: '↩ Sales Returns', count: db.salesReturns.filter(r => inRange(r.dateTime)).length },
+          { key: 'purchase', label: '📤 Purchase Returns', count: db.purchaseReturns.filter(r => inRange(r.dateTime)).length },
+        ]} />
+        {retTab === 'sales' && (
+          db.salesReturns.filter(r => inRange(r.dateTime)).length === 0
+            ? <Card><Empty text="No sales returns in this period." /></Card>
+            : <div className="grid sm:grid-cols-2 xl:grid-cols-3 gap-3">
+                {db.salesReturns.filter(r => inRange(r.dateTime)).map(r => { const orig = db.sales.find(x => x.id === r.saleId); return (
+                  <div key={r.id} className="border border-slate-200 dark:border-slate-700 rounded-xl p-3 bg-white dark:bg-slate-800 flex flex-col">
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="font-bold">{r.returnNo}</div>
+                      <Btn kind="soft" onClick={() => setSrDetail(r.id)}>View Details</Btn>
+                    </div>
+                    <div className="mt-1.5 flex-1">
+                      <DetailRow label="Original invoice">{orig?.invoiceNo ?? '—'}</DetailRow>
+                      <DetailRow label="Customer">{db.customers.find(c => c.id === orig?.customerId)?.name ?? '—'}</DetailRow>
+                      <DetailRow label="Return date">{fmtDateTime(r.dateTime)}</DetailRow>
+                      <DetailRow label="Refund amount"><span className="font-bold">{money(r.refundPaisa)}</span></DetailRow>
+                      <DetailRow label="Refund method">{r.method}</DetailRow>
+                    </div>
+                    <div className="mt-2 pt-2 border-t border-dashed border-slate-200 dark:border-slate-600 text-sm break-words"><span className="text-slate-400 text-xs uppercase tracking-wide font-semibold">Reason</span><div className="mt-0.5">{r.reason}</div></div>
+                  </div>); })}
+              </div>
+        )}
+        {retTab === 'purchase' && (
+          db.purchaseReturns.filter(r => inRange(r.dateTime)).length === 0
+            ? <Card><Empty text="No purchase returns in this period." /></Card>
+            : <div className="grid sm:grid-cols-2 xl:grid-cols-3 gap-3">
+                {db.purchaseReturns.filter(r => inRange(r.dateTime)).map(r => (
+                  <div key={r.id} className="border border-slate-200 dark:border-slate-700 rounded-xl p-3 bg-white dark:bg-slate-800 flex flex-col">
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="font-bold">{r.returnNo}</div>
+                      <Btn kind="soft" onClick={() => setPrDetail(r.id)}>View Details</Btn>
+                    </div>
+                    <div className="mt-1.5 flex-1">
+                      <DetailRow label="Supplier">{db.suppliers.find(x => x.id === r.supplierId)?.name ?? '—'}</DetailRow>
+                      <DetailRow label="Return date">{fmtDateTime(r.dateTime)}</DetailRow>
+                      <DetailRow label="Return value"><span className="font-bold">{money(r.totalPaisa)}</span></DetailRow>
+                      <DetailRow label="Recorded by">{db.users.find(u => u.id === r.userId)?.fullName ?? '—'}</DetailRow>
+                    </div>
+                    <div className="mt-2 pt-2 border-t border-dashed border-slate-200 dark:border-slate-600 text-sm break-words"><span className="text-slate-400 text-xs uppercase tracking-wide font-semibold">Reason</span><div className="mt-0.5">{r.reason}</div></div>
+                  </div>))}
+              </div>
+        )}
       </>)}
 
       {rep === 'movements' && <Card title="Inventory movement report">
@@ -179,6 +272,45 @@ export function Reports({ user }: { user: SessionUser }) {
           {slowRows.map(r => <tr key={r.m.id}><td>{medLabel(r.m)}</td><td>{r.stock}</td><td>{r.sold}</td><td>{money(r.value)}</td></tr>)}
         </Table>
         <div className="mt-3"><ExportBtn filename="slow-moving-report.csv" headerLine={exportHeader} rows={slowRows.map(r => ({ Medicine: medLabel(r.m), SaleableStock: r.stock, QtySoldInPeriod: r.sold, SaleableStockValuePKR: r.value / 100 }))} /></div></Card>}
+      {srDetail !== null && (() => { const r = db.salesReturns.find(x => x.id === srDetail)!; const orig = db.sales.find(x => x.id === r.saleId); return (
+        <Modal title={`Sales return ${r.returnNo}`} onClose={() => setSrDetail(null)} wide>
+          <div className="grid sm:grid-cols-2 gap-x-6 mb-3">
+            <DetailRow label="Original invoice">{orig?.invoiceNo ?? '—'}</DetailRow>
+            <DetailRow label="Customer">{db.customers.find(c => c.id === orig?.customerId)?.name ?? '—'}</DetailRow>
+            <DetailRow label="Date & time">{fmtDateTime(r.dateTime)}</DetailRow>
+            <DetailRow label="Refund method">{r.method}</DetailRow>
+            <DetailRow label="Recorded by">{db.users.find(u => u.id === r.userId)?.fullName ?? '—'}</DetailRow>
+            <DetailRow label="Total refund"><span className="font-bold">{money(r.refundPaisa)}</span></DetailRow>
+          </div>
+          <div className="space-y-2">
+            {db.salesReturnItems.filter(x => x.returnId === r.id).map(ri => { const si = db.saleItems.find(x => x.id === ri.saleItemId); return (
+              <div key={ri.id} className="border border-slate-200 dark:border-slate-700 rounded-xl p-3">
+                <div className="font-semibold break-words">{si?.medicineName ?? engine.medicine(ri.medicineId).name}</div>
+                <div className="grid sm:grid-cols-2 gap-x-6 mt-1">
+                  <DetailRow label="Batch (as sold)">{si ? si.allocations.map(a => `${a.batchNo}×${a.qty}`).join(', ') : '—'}</DetailRow>
+                  <DetailRow label="Qty returned">{ri.qty}</DetailRow>
+                  <DetailRow label="Condition / disposition">{ri.disposition}</DetailRow>
+                  <DetailRow label="Refund">{money(ri.amountPaisa)}</DetailRow>
+                </div>
+              </div>); })}
+          </div>
+          <p className="text-sm mt-3 break-words"><span className="text-slate-400">Reason:</span> {r.reason}</p>
+          <div className="flex justify-end mt-4"><Btn onClick={() => setSrDetail(null)}>Close</Btn></div>
+        </Modal>); })()}
+      {prDetail !== null && (() => { const r = db.purchaseReturns.find(x => x.id === prDetail)!; return (
+        <Modal title={`Purchase return ${r.returnNo}`} onClose={() => setPrDetail(null)} wide>
+          <div className="grid sm:grid-cols-2 gap-x-6 mb-3">
+            <DetailRow label="Supplier">{db.suppliers.find(x => x.id === r.supplierId)?.name ?? '—'}</DetailRow>
+            <DetailRow label="Date & time">{fmtDateTime(r.dateTime)}</DetailRow>
+            <DetailRow label="Recorded by">{db.users.find(u => u.id === r.userId)?.fullName ?? '—'}</DetailRow>
+            <DetailRow label="Total value"><span className="font-bold">{money(r.totalPaisa)}</span></DetailRow>
+          </div>
+          <Table head={['Medicine', 'Batch', 'Qty returned', 'Batch cost', 'Value']}>
+            {db.purchaseReturnItems.filter(x => x.returnId === r.id).map(i2 => { const b = db.batches.find(x => x.id === i2.batchId); return <tr key={i2.id}><td>{engine.medicine(i2.medicineId).name}</td><td>{b?.batchNo ?? '—'}</td><td>{i2.qty}</td><td>{money(i2.costPaisa)}</td><td className="font-semibold">{money(i2.costPaisa * i2.qty)}</td></tr>; })}
+          </Table>
+          <p className="text-sm mt-3 break-words"><span className="text-slate-400">Reason:</span> {r.reason}</p>
+          <div className="flex justify-end mt-4"><Btn onClick={() => setPrDetail(null)}>Close</Btn></div>
+        </Modal>); })()}
       <p className="text-xs text-slate-400 mt-3">Profit formulas and assumptions: see docs/FINANCIAL_RULES.md. Net operating profit excludes income tax, owner drawings and loan interest unless recorded as expenses.</p>
     </Page>
   );
