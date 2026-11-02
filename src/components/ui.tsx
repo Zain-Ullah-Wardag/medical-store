@@ -113,15 +113,41 @@ export function Confirm({ text, onYes, onNo }: { text: string; onYes: () => void
   );
 }
 
-export function Table({ head, children }: { head: string[]; children: React.ReactNode }) {
+export function Table({ head, children, minW = 560 }: { head: string[]; children: React.ReactNode; minW?: number }) {
   return (
     <div className="overflow-x-auto -mx-4 px-4">
-      <table className="w-full text-sm min-w-[560px]">
+      <table className="w-full text-sm" style={{ minWidth: minW || undefined }}>
         <thead><tr className="text-left text-[11px] uppercase tracking-wide text-slate-400 border-b border-slate-100 dark:border-slate-700">
           {head.map(h => <th key={h} className="py-2 pr-3 font-semibold whitespace-nowrap">{h}</th>)}
         </tr></thead>
         <tbody className="[&>tr]:border-b [&>tr]:border-slate-50 dark:[&>tr]:border-slate-700/60 [&>tr:hover]:bg-slate-50 dark:[&>tr:hover]:bg-slate-700/30 [&_td]:py-2 [&_td]:pr-3 [&_td]:align-top text-slate-700 dark:text-slate-200">{children}</tbody>
       </table>
+    </div>
+  );
+}
+
+/** Simple pill tabs used across redesigned pages (Sales Returns, Reports). */
+export function Tabs<T extends string>({ value, onChange, tabs }: {
+  value: T; onChange: (v: T) => void; tabs: { key: T; label: string; count?: number }[];
+}) {
+  return (
+    <div className="flex gap-1.5 flex-wrap mb-4 p-1 rounded-xl bg-slate-100 dark:bg-slate-700/40 w-fit max-w-full">
+      {tabs.map(t => (
+        <button key={t.key} onClick={() => onChange(t.key)}
+          className={`px-3.5 py-1.5 rounded-lg text-sm font-semibold transition ${value === t.key ? 'bg-teal-600 text-white shadow' : 'text-slate-600 dark:text-slate-300 hover:bg-white dark:hover:bg-slate-700'}`}>
+          {t.label}{t.count !== undefined ? ` (${t.count})` : ''}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+/** Label/value row used inside record cards and detail modals. */
+export function DetailRow({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div className="flex justify-between gap-3 py-1 text-sm">
+      <span className="text-slate-400 shrink-0">{label}</span>
+      <span className="font-medium text-right break-words">{children}</span>
     </div>
   );
 }
