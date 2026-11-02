@@ -11,7 +11,9 @@ export function Expenses({ user }: { user: SessionUser }) {
   const [cat, setCat] = useState(''); const [from, setFrom] = useState(todayStr().slice(0, 8) + '01'); const [to, setTo] = useState(todayStr());
   const [statusF, setStatusF] = useState<'all' | 'active' | 'reversed'>('all');
   const [revId, setRevId] = useState<number | null>(null); const [revReason, setRevReason] = useState('');
-  const rows = db.expenses.filter(e => e.date >= from && e.date <= to && (!cat || e.category === cat) && (statusF === 'all' || (statusF === 'reversed' ? !!e.reversedAt : !e.reversedAt))).sort((a, b) => b.id - a.id);
+  const rows = engine.listExpenses(user, { from, to, category: cat, status: statusF });
+  const totalReversed = engine.reversedExpenseCount();
+  const reversedInDbOutsideRange = statusF === 'reversed' && rows.length === 0 && totalReversed > 0;
   return (
     <Page title="Expenses" sub="Operating expenses reduce net operating profit — they are never mixed into medicine cost."
       actions={<>
@@ -20,7 +22,7 @@ export function Expenses({ user }: { user: SessionUser }) {
       </>}>
       <div className="grid md:grid-cols-3 gap-3 mb-4">
         <Stat label="Expenses in period (net)" value={money(rows.filter(e => !e.reversedAt).reduce((s, e) => s + e.amountPaisa, 0))} tone="amber" hint="Reversed expenses excluded" />
-        {rows.some(e => e.reversedAt) && <Stat label="Reversed (excluded)" value={money(rows.filter(e => e.reversedAt).reduce((s, e) => s + e.amountPaisa, 0))} tone="slate" />}
+        {totalReversed > 0 && <Stat label="Reversed in view (excluded from net)" value={money(rows.filter(e => e.reversedAt).reduce((s, e) => s + e.amountPaisa, 0))} hint={`${totalReversed} reversed in database (all dates)`} tone="slate" />}
       </div>
       <Card>
         <div className="grid md:grid-cols-4 gap-2 mb-3">
@@ -32,7 +34,11 @@ export function Expenses({ user }: { user: SessionUser }) {
           </select>
         </div>
         <p className="text-xs text-slate-400 mb-3">Reversed expenses are never deleted — they stay here for audit, struck through, and are excluded from totals and reports.</p>
-        {rows.length === 0 ? <Empty text="No expenses in this period." /> : (
+        {rows.length === 0 ? <Empty text={statusF === 'reversed'
+          ? (totalReversed === 0
+              ? 'No reversed expenses exist in this database yet. (Expenses reversed in app versions before the reversal feature was added were deleted by that old version and cannot be listed — check Audit Logs.)'
+              : `${totalReversed} reversed expense(s) exist, but none fall inside ${fmtDate(from)} → ${fmtDate(to)}${cat ? ` in category “${cat}”` : ''}. The filter uses each expense's own date — widen the date range.`)
+          : 'No expenses in this period.'} /> : (
           <Table head={['Date', 'Category', 'Description', 'Method', 'Recorded by', 'Amount', '']}>
             {rows.map(e => <tr key={e.id} className={e.reversedAt ? 'opacity-60' : ''}><td>{fmtDate(e.date)}</td><td><Badge>{e.category}</Badge>{e.reversedAt && <> <Badge color="amber">reversed</Badge></>}</td>
               <td>{e.description}{e.reference ? ` · ${e.reference}` : ''}{e.reversedAt && <div className="text-xs text-slate-400">Reversed by {db.users.find(u => u.id === e.reversedBy)?.fullName ?? '—'} on {fmtDateTime(e.reversedAt)}: {e.reversalReason}</div>}</td>

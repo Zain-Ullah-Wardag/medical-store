@@ -74,7 +74,8 @@ export default function App() {
     return can(user.role, n.perm) || can(user.role, n.perm.replace('.own', '')) || (n.key === 'salesReturns' && user.role === 'cashier' && db.settings.allowCashierReturns);
   };
   const visibleNav = NAV.filter(n => pageAllowedFor(n.key));
-  const alerts = engine.alerts();
+  // Inventory alert badge only for roles allowed to see business alerts.
+  const alerts = can(user.role, 'reports.view') ? engine.alerts() : { expired: [], nearExpiry: [], lowStock: [] };
   const alertCount = alerts.expired.length + alerts.nearExpiry.length + alerts.lowStock.length;
 
   const go = (p: string) => { setPage(p as PageKey); setMobileNav(false); };

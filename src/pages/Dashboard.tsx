@@ -16,13 +16,19 @@ export function Dashboard({ user, go }: { user: SessionUser; go: (p: string) => 
   const canPurchases = can(user.role, 'purchases.view');
   const stats = useMemo(() => engine.rangeStats(from, to, user), [from, to, db]);
   const today = useMemo(() => engine.rangeStats(todayStr(), todayStr(), user), [db]);
-  const { nearExpiry, expired, lowStock } = engine.alerts();
+  // Business-wide figures (inventory value, outstanding balances, stock
+  // alerts) are fetched ONLY for authorized roles — the engine refuses to
+  // produce them for cashiers, so nothing restricted reaches this page.
+  const business = can(user.role, 'reports.view') ? engine.dashboardBusinessData(user) : null;
+  const nearExpiry = business?.nearExpiry ?? [];
+  const expired = business?.expired ?? [];
+  const lowStock = business?.lowStock ?? [];
   const trend = engine.salesTrend(14, user).map(d => ({ date: d.date.slice(5), Sales: d.salesPaisa / 100, Invoices: d.invoices }));
   const top = engine.topSelling(addDays(todayStr(), -30), todayStr(), 5, user);
   const recentSales = engine.recentSales(user, 5);
   const recentPurchases = canPurchases ? [...db.purchases].sort((a, b) => b.id - a.id).slice(0, 5) : [];
-  const custOut = db.customers.reduce((s, c) => s + Math.max(0, engine.customerBalance(c.id)), 0);
-  const suppOut = db.suppliers.reduce((s, c) => s + Math.max(0, engine.supplierBalance(c.id)), 0);
+  const custOut = business?.customersOwePaisa ?? 0;
+  const suppOut = business?.suppliersOwePaisa ?? 0;
   const showProfit = can(user.role, 'reports.view') || user.role === 'admin';
 
   return (
@@ -39,12 +45,12 @@ export function Dashboard({ user, go }: { user: SessionUser; go: (p: string) => 
         {showProfit && <Stat label="Gross profit (period)" value={money(stats.grossProfit)} hint={`COGS ${money(stats.cogs)} (batch cost)`} tone="teal" />}
         {showProfit && <Stat label="Expenses (period)" value={money(stats.expenses)} hint="Recorded operating expenses" tone="amber" />}
         {showProfit && <Stat label="Net operating profit (est.)" value={money(stats.netOperatingProfit)} hint="Gross profit − expenses" tone="teal" />}
-        <Stat label="Inventory value" value={money(engine.inventoryValuation())} hint="Saleable batches at cost" tone="blue" />
-        <Stat label="Customers owe us" value={money(custOut)} hint="Outstanding udhaar" tone="amber" />
-        {canPurchases && <Stat label="We owe suppliers" value={money(suppOut)} hint="Outstanding payables" tone="amber" />}
-        <Stat label="Low-stock medicines" value={String(lowStock.length)} hint="At/below minimum level" tone={lowStock.length ? 'amber' : 'slate'} />
-        <Stat label="Near-expiry batches" value={String(nearExpiry.length)} hint={`Within ${db.settings.expiryWarnDays} days`} tone={nearExpiry.length ? 'amber' : 'slate'} />
-        <Stat label="Expired batches" value={String(expired.length)} hint="Blocked from sale" tone={expired.length ? 'red' : 'slate'} />
+        {business && <Stat label="Inventory value" value={money(business.inventoryValuePaisa)} hint="Saleable batches at cost" tone="blue" />}
+        {business && <Stat label="Customers owe us" value={money(custOut)} hint="Outstanding udhaar" tone="amber" />}
+        {business && canPurchases && <Stat label="We owe suppliers" value={money(suppOut)} hint="Outstanding payables" tone="amber" />}
+        {business && <Stat label="Low-stock medicines" value={String(lowStock.length)} hint="At/below minimum level" tone={lowStock.length ? 'amber' : 'slate'} />}
+        {business && <Stat label="Near-expiry batches" value={String(nearExpiry.length)} hint={`Within ${db.settings.expiryWarnDays} days`} tone={nearExpiry.length ? 'amber' : 'slate'} />}
+        {business && <Stat label="Expired batches" value={String(expired.length)} hint="Blocked from sale" tone={expired.length ? 'red' : 'slate'} />}
       </div>
 
       <div className="grid lg:grid-cols-3 gap-4 mb-4">
@@ -65,7 +71,7 @@ export function Dashboard({ user, go }: { user: SessionUser; go: (p: string) => 
       </div>
 
       <div className="grid lg:grid-cols-3 gap-4">
-        <Card title="⚠ Inventory alerts">
+        {business && (<Card title="⚠ Inventory alerts">
           {expired.length + nearExpiry.length + lowStock.length === 0 ? <Empty text="All clear — no expiry or low-stock alerts." /> : (
             <ul className="space-y-2 text-sm">
               {expired.map(b => <li key={b.id} className="flex justify-between gap-2"><span>{engine.medicine(b.medicineId).name} · {b.batchNo}</span><Badge color="red">Expired {fmtDate(b.expiryDate)}</Badge></li>)}
@@ -74,7 +80,7 @@ export function Dashboard({ user, go }: { user: SessionUser; go: (p: string) => 
             </ul>
           )}
           <button className="mt-3 text-teal-600 text-sm font-semibold" onClick={() => go('inventory')}>Open Inventory →</button>
-        </Card>
+        </Card>)}
         <Card title={ownOnly ? 'Your recent sales' : 'Recent sales'}>
           {recentSales.length === 0 ? <Empty text="No sales yet." /> : (
             <Table head={['Invoice', 'Time', 'Total']}>{recentSales.map(s => (

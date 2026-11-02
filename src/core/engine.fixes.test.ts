@@ -365,3 +365,64 @@ describe('bill discount validation (Priority 9)', () => {
     expect(eng.integrityCheck()).toEqual([]);
   });
 });
+
+describe('cashier dashboard business-data restriction (QA round 3, item 1)', () => {
+  it('engine refuses to produce inventory value / balances / alerts for cashiers', () => {
+    stockedMed(26, 35, 40);
+    eng.saveCustomer(admin, { name: 'OwesUs', openingBalancePaisa: toPaisa(300) });
+    expect(() => eng.dashboardBusinessData(cashier)).toThrow(/Permission denied/);
+    const biz = eng.dashboardBusinessData(admin);
+    expect(biz.inventoryValuePaisa).toBe(toPaisa(26 * 40));
+    expect(biz.customersOwePaisa).toBe(toPaisa(300));
+    expect(Array.isArray(biz.expired) && Array.isArray(biz.lowStock)).toBe(true);
+    expect(eng.dashboardBusinessData(pharm).inventoryValuePaisa).toBeGreaterThan(0);
+    // cashier sales data remains available (own-scope, previously fixed)
+    expect(eng.rangeStats(todayStr(), todayStr(), cashier).invoiceCount).toBe(0);
+    expect(eng.recentSales(cashier)).toEqual([]);
+  });
+});
+
+describe('expense list filters (QA round 3, item 2)', () => {
+  it('all / active / reversed return exactly the right records within the date range', () => {
+    const e1 = eng.createExpense(admin, { date: todayStr(), category: 'Rent', description: 'r1', amountPaisa: toPaisa(100), method: 'Cash', reference: '' });
+    const e2 = eng.createExpense(admin, { date: todayStr(), category: 'Other', description: 'o1', amountPaisa: toPaisa(50), method: 'Cash', reference: '' });
+    eng.createExpense(admin, { date: addDays(todayStr(), -40), category: 'Rent', description: 'old', amountPaisa: toPaisa(70), method: 'Cash', reference: '' });
+    eng.reverseExpense(admin, e2.id, 'duplicate entry');
+    const from = addDays(todayStr(), -7), to = todayStr();
+    expect(eng.listExpenses(admin, { from, to, status: 'all' }).map(x => x.id).sort()).toEqual([e1.id, e2.id].sort());
+    expect(eng.listExpenses(admin, { from, to, status: 'active' }).map(x => x.id)).toEqual([e1.id]);
+    const reversed = eng.listExpenses(admin, { from, to, status: 'reversed' });
+    expect(reversed.map(x => x.id)).toEqual([e2.id]);
+    expect(reversed[0].reversalReason).toBe('duplicate entry');
+    expect(reversed[0].reversedBy).toBe(admin.id);
+    expect(eng.reversedExpenseCount()).toBe(1);
+    // category + status combine; out-of-range records excluded by expense date
+    expect(eng.listExpenses(admin, { from, to, category: 'Rent', status: 'reversed' }).length).toBe(0);
+    expect(eng.listExpenses(admin, { from: addDays(todayStr(), -60), to, status: 'all' }).length).toBe(3);
+    // reversed amounts stay out of net totals; no duplicate reversal possible
+    expect(eng.rangeStats(from, to).expenses).toBe(toPaisa(100));
+    expect(() => eng.reverseExpense(admin, e2.id, 'again')).toThrow(/already been reversed/);
+    expect(() => eng.listExpenses(cashier, { from, to, status: 'all' })).toThrow(/Permission denied/);
+  });
+});
+
+describe('price override security regressions (QA round 3, item 5 — preserve)', () => {
+  it('failed/cancelled approval changes nothing: no record, original price intact', () => {
+    const med = stockedMed();
+    const before = eng.db.priceOverrides.length;
+    expect(() => eng.authorizePriceOverride(cashier, { medicineId: med.id, newUnitPricePaisa: toPaisa(20), reason: 'x', approverUsername: 'admin', approverPassword: 'bad' })).toThrow(/incorrect/);
+    expect(() => eng.authorizePriceOverride(cashier, { medicineId: med.id, newUnitPricePaisa: toPaisa(20), reason: 'x', approverUsername: 'cash', approverPassword: 'cash123' })).toThrow(/not authorized to approve/);
+    expect(eng.db.priceOverrides.length).toBe(before); // nothing recorded
+    // original price still the authorized one, and a normal sale still works
+    expect(eng.authorizedUnitPrice(med.id)).toBe(toPaisa(35));
+    const sale = eng.createSale(cashier, { customerId: walkIn(), billDiscountPaisa: 0, idempotencyKey: 'po-reg-1', items: [{ medicineId: med.id, qty: 1, unitPricePaisa: toPaisa(35), discountPaisa: 0 }], payments: [{ method: 'Cash', amountPaisa: toPaisa(35) }] });
+    expect(sale.totalPaisa).toBe(toPaisa(35));
+  });
+  it('a deactivated administrator cannot approve overrides', () => {
+    const med = stockedMed();
+    eng.createUser(admin, { username: 'admin2', fullName: 'Second Admin', password: 'admin2pw', role: 'admin' });
+    const a2 = eng.db.users.find(u => u.username === 'admin2')!;
+    eng.updateUser(admin, a2.id, { active: false });
+    expect(() => eng.authorizePriceOverride(cashier, { medicineId: med.id, newUnitPricePaisa: toPaisa(20), reason: 'x', approverUsername: 'admin2', approverPassword: 'admin2pw' })).toThrow(/incorrect/);
+  });
+});

@@ -914,6 +914,23 @@ export class Engine {
       return e;
     });
   }
+  /**
+   * Expense listing with status filter — the one query behind the Expenses
+   * page. 'reversed' returns expenses flagged reversedAt (kept forever for
+   * audit); 'active' returns the rest; 'all' returns both. Date range
+   * applies to the expense's own accounting date.
+   */
+  listExpenses(actor: T.SessionUser, f: { from: string; to: string; category?: string; status: 'all' | 'active' | 'reversed' }): T.Expense[] {
+    this.require(actor, 'expenses.view');
+    return this.db.expenses
+      .filter(e => e.date >= f.from && e.date <= f.to
+        && (!f.category || e.category === f.category)
+        && (f.status === 'all' || (f.status === 'reversed' ? !!e.reversedAt : !e.reversedAt)))
+      .sort((a, b) => b.id - a.id);
+  }
+  /** How many reversed expenses exist in total (diagnostic for empty filters). */
+  reversedExpenseCount(): number { return this.db.expenses.filter(e => !!e.reversedAt).length; }
+
   /** Reverses an expense WITHOUT deleting it: the original stays visible,
    *  flagged reversed, reports exclude it, and (for cash) a reversing cash
    *  movement restores the drawer. Audited as expense.reverse. */
@@ -1052,6 +1069,23 @@ export class Engine {
       bump(name, -ri.qty, -ri.amountPaisa, ri.disposition === 'saleable' ? -ri.costReversedPaisa : 0);
     }
     return [...map.values()].sort((a, b) => b.revenuePaisa - a.revenuePaisa);
+  }
+  /**
+   * Business-wide dashboard data (inventory value at cost, outstanding
+   * balances, stock/expiry alerts). Restricted to roles with 'reports.view'
+   * (administrator/pharmacist) and enforced HERE: unauthorized callers get
+   * a Permission denied error, so the data is never produced for cashiers —
+   * it is not merely hidden in the UI.
+   */
+  dashboardBusinessData(actor: T.SessionUser) {
+    this.require(actor, 'reports.view');
+    const a = this.alerts();
+    return {
+      inventoryValuePaisa: this.inventoryValuation(),
+      customersOwePaisa: this.db.customers.reduce((s, c) => s + Math.max(0, this.customerBalance(c.id)), 0),
+      suppliersOwePaisa: this.db.suppliers.reduce((s, c) => s + Math.max(0, this.supplierBalance(c.id)), 0),
+      expired: a.expired, nearExpiry: a.nearExpiry, lowStock: a.lowStock,
+    };
   }
   inventoryValuation(): number {
     const on = todayStr();
