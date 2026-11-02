@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react';
 import { engine } from '../lib/store';
-import { Page, Card, Btn, Modal, Field, inputCls, money, Table, Badge, Empty, run, fmtDate, fmtDateTime, ExportBtn, medLabel } from '../components/ui';
+import { Page, Card, Btn, Modal, Field, inputCls, money, Table, Badge, Empty, run, fmtDate, fmtDateTime, ExportBtn, medLabel, DetailRow, Tabs } from '../components/ui';
 import { todayStr } from '../core/money';
 import type { Sale, SessionUser } from '../core/types';
 import { can } from '../core/types';
@@ -60,16 +60,35 @@ export function SalesHistory({ user }: { user: SessionUser }) {
   );
 }
 
+const DISPOSITION_LABEL: Record<string, string> = {
+  saleable: 'Sealed & good → back to saleable stock',
+  quarantine: 'Questionable → quarantine',
+  damaged: 'Damaged/opened → damaged',
+};
+const DISPOSITION_RESULT: Record<string, string> = {
+  saleable: 'Returned to saleable stock',
+  quarantine: 'Quarantine batch (not saleable)',
+  damaged: 'Damaged batch (not saleable)',
+};
+/** Exact engine refund formula (createSalesReturn): proportional share of the line total. */
+const refundPreview = (lineTotalPaisa: number, returnQty: number, soldQty: number) =>
+  soldQty > 0 && returnQty > 0 ? Math.round((lineTotalPaisa * returnQty) / soldQty) : 0;
+
 export function SalesReturns({ user }: { user: SessionUser }) {
   const db = engine.db;
+  const [tab, setTab] = useState<'new' | 'history'>('new');
   const [invQuery, setInvQuery] = useState('');
   const [saleId, setSaleId] = useState<number | null>(null);
   const [qtys, setQtys] = useState<Record<number, number>>({});
   const [disps, setDisps] = useState<Record<number, 'saleable' | 'quarantine' | 'damaged'>>({});
   const [method, setMethod] = useState<'cash' | 'credit' | 'card' | 'bank'>('cash'); const [reason, setReason] = useState('');
+  const [detailRet, setDetailRet] = useState<number | null>(null);
   const sale = db.sales.find(s => s.id === saleId);
   const items = sale ? db.saleItems.filter(i => i.saleId === sale.id) : [];
   const matches = useMemo(() => invQuery ? db.sales.filter(s => s.invoiceNo.toLowerCase().includes(invQuery.toLowerCase())).slice(0, 6) : [], [invQuery, db]);
+  const lineRefund = (i: (typeof items)[number]) => refundPreview(i.lineTotalPaisa, qtys[i.id] ?? 0, i.qty);
+  const selectedLines = items.filter(i => (qtys[i.id] ?? 0) > 0);
+  const totalRefund = items.reduce((sum, i) => sum + lineRefund(i), 0);
   const submit = () => {
     if (!sale) return;
     const ok = run(() => engine.createSalesReturn(user, {
@@ -78,46 +97,161 @@ export function SalesReturns({ user }: { user: SessionUser }) {
     }), 'Sales return recorded.');
     if (ok) { setQtys({}); setReason(''); }
   };
+  const history = [...db.salesReturns].reverse();
   return (
     <Page title="Sales Returns" sub="Returns never delete the original sale. Opened/damaged/expired medicine goes to quarantine — never back on the saleable shelf automatically.">
-      <div className="grid lg:grid-cols-2 gap-4 items-start">
-        <Card title="1) Find the original invoice">
-          <input className={inputCls} placeholder="Type invoice number, e.g. INV-000001" value={invQuery} onChange={e => setInvQuery(e.target.value)} />
-          <div className="divide-y divide-slate-100 dark:divide-slate-700 mt-2">
-            {matches.map(s => <button key={s.id} onClick={() => { setSaleId(s.id); setQtys({}); }} className="w-full flex justify-between py-2 text-left text-sm hover:bg-teal-50 dark:hover:bg-slate-700/40 rounded px-1">
-              <span><b>{s.invoiceNo}</b> · {fmtDateTime(s.dateTime)}</span><span className="font-semibold">{money(s.totalPaisa)}</span></button>)}
-          </div>
+      <Tabs value={tab} onChange={setTab} tabs={[
+        { key: 'new', label: '↩ New Return' },
+        { key: 'history', label: '🕘 Return History', count: history.length },
+      ]} />
+
+      {tab === 'new' && (
+        <div className="space-y-4">
+          <Card title="1) Find the original invoice">
+            <input className={inputCls} placeholder="Type invoice number, e.g. INV-000001" value={invQuery} onChange={e => setInvQuery(e.target.value)} />
+            <div className="divide-y divide-slate-100 dark:divide-slate-700 mt-2">
+              {matches.map(s => <button key={s.id} onClick={() => { setSaleId(s.id); setQtys({}); setDisps({}); }} className={`w-full flex justify-between py-2 text-left text-sm rounded px-1 ${saleId === s.id ? 'bg-teal-50 dark:bg-teal-900/30' : 'hover:bg-teal-50 dark:hover:bg-slate-700/40'}`}>
+                <span><b>{s.invoiceNo}</b> · {fmtDateTime(s.dateTime)} · {db.customers.find(c => c.id === s.customerId)?.name ?? '—'}</span><span className="font-semibold">{money(s.totalPaisa)}</span></button>)}
+            </div>
+            {invQuery && matches.length === 0 && <Empty text="No invoice matches that number." />}
+          </Card>
+
           {sale && (
-            <div className="mt-3 space-y-2">
-              {items.map(i => { const returned = engine.returnedQtyForSaleItem(i.id); const max = i.qty - returned; return (
-                <div key={i.id} className="border border-slate-100 dark:border-slate-700 rounded-xl p-2.5 text-sm">
-                  <div className="font-semibold">{i.medicineName} <span className="text-slate-400 font-normal">sold {i.qty}, returned {returned}, eligible {max}</span></div>
-                  <div className="flex gap-2 mt-1.5">
-                    <input type="number" min={0} max={max} className={inputCls + ' !w-24'} placeholder="Return qty" value={qtys[i.id] ?? ''} onChange={e => setQtys(q => ({ ...q, [i.id]: parseInt(e.target.value) || 0 }))} />
-                    <select className={inputCls} value={disps[i.id] ?? 'quarantine'} onChange={e => setDisps(d => ({ ...d, [i.id]: e.target.value as any }))}>
-                      <option value="saleable">Sealed & good → back to saleable stock</option>
-                      <option value="quarantine">Questionable → quarantine</option>
-                      <option value="damaged">Damaged/opened → damaged</option>
-                    </select>
+            <>
+              <Card title={`2) Invoice ${sale.invoiceNo}`}>
+                <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-x-6">
+                  <DetailRow label="Customer">{db.customers.find(c => c.id === sale.customerId)?.name ?? '—'}</DetailRow>
+                  <DetailRow label="Sale date">{fmtDateTime(sale.dateTime)}</DetailRow>
+                  <DetailRow label="Sold by">{db.users.find(u => u.id === sale.userId)?.fullName ?? '—'}</DetailRow>
+                  <DetailRow label="Invoice total">{money(sale.totalPaisa)} (paid {money(sale.paidPaisa)})</DetailRow>
+                </div>
+              </Card>
+
+              <div className="grid sm:grid-cols-2 xl:grid-cols-3 gap-3">
+                {items.map(i => { const returned = engine.returnedQtyForSaleItem(i.id); const max = i.qty - returned; const q = qtys[i.id] ?? 0; const sel = q > 0; return (
+                  <div key={i.id} className={`border rounded-xl p-3 bg-white dark:bg-slate-800 transition ${sel ? 'border-teal-500 ring-1 ring-teal-500' : 'border-slate-200 dark:border-slate-700'}`}>
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="font-semibold leading-snug break-words">{i.medicineName}</div>
+                      {sel && <Badge color="green">returning {q}</Badge>}
+                    </div>
+                    <div className="text-xs text-slate-400 break-words mt-0.5">
+                      Batch {i.allocations.map(a => `${a.batchNo}×${a.qty}`).join(', ')}{i.packaging ? ` · sold as ${i.packaging}` : ''}
+                    </div>
+                    <div className="mt-2 space-y-0.5">
+                      <DetailRow label="Originally sold">{i.qty}</DetailRow>
+                      <DetailRow label="Unit selling price">{money(i.unitPricePaisa)}</DetailRow>
+                      <DetailRow label="Already returned">{returned}</DetailRow>
+                      <DetailRow label="Available to return">{max}</DetailRow>
+                    </div>
+                    <div className="flex items-end justify-between gap-2 mt-2 pt-2 border-t border-dashed border-slate-200 dark:border-slate-600">
+                      <div>
+                        <label className="block text-[11px] uppercase tracking-wide text-slate-400 font-semibold mb-1">Return qty</label>
+                        <input type="number" min={0} max={max} step={1} inputMode="numeric" disabled={max === 0}
+                          aria-label={`Return quantity for ${i.medicineName}`}
+                          className={inputCls + ' !w-[104px] text-center'}
+                          value={qtys[i.id] ?? 0}
+                          onFocus={e => e.target.select()}
+                          onWheel={e => (e.target as HTMLInputElement).blur()}
+                          onChange={e => { const v = e.target.value === '' ? 0 : parseInt(e.target.value, 10); setQtys(prev => ({ ...prev, [i.id]: Number.isNaN(v) ? 0 : Math.max(0, Math.min(max, v)) })); }} />
+                      </div>
+                      <div className="text-right">
+                        <div className="text-[11px] uppercase tracking-wide text-slate-400 font-semibold">Refund</div>
+                        <div className="font-bold">{q > 0 ? money(lineRefund(i)) : '—'}</div>
+                      </div>
+                    </div>
+                    <div className="mt-2">
+                      <label className="block text-[11px] uppercase tracking-wide text-slate-400 font-semibold mb-1">Medicine condition / stock disposition</label>
+                      <select className={inputCls} disabled={max === 0} value={disps[i.id] ?? 'quarantine'} onChange={e => setDisps(d => ({ ...d, [i.id]: e.target.value as any }))}>
+                        <option value="saleable">{DISPOSITION_LABEL.saleable}</option>
+                        <option value="quarantine">{DISPOSITION_LABEL.quarantine}</option>
+                        <option value="damaged">{DISPOSITION_LABEL.damaged}</option>
+                      </select>
+                    </div>
+                    {max === 0 && <div className="text-[11px] text-slate-400 mt-1.5">Fully returned already.</div>}
+                  </div>); })}
+              </div>
+
+              <Card title="3) Return summary">
+                <div className="grid sm:grid-cols-3 gap-x-6 mb-3">
+                  <DetailRow label="Medicines selected">{selectedLines.length} of {items.length}</DetailRow>
+                  <DetailRow label="Units returning">{selectedLines.reduce((sum, i) => sum + (qtys[i.id] ?? 0), 0)}</DetailRow>
+                  <DetailRow label="Estimated refund">{money(totalRefund)}</DetailRow>
+                </div>
+                <div className="grid sm:grid-cols-2 gap-3">
+                  <Field label="Refund method"><select className={inputCls} value={method} onChange={e => setMethod(e.target.value as any)}>
+                    <option value="cash">Cash refund</option><option value="credit">Customer credit (reduce udhaar)</option><option value="card">Card reversal</option><option value="bank">Bank transfer</option></select></Field>
+                  <Field label="Reason *"><input className={inputCls} value={reason} onChange={e => setReason(e.target.value)} placeholder="e.g. Wrong medicine dispensed" /></Field>
+                </div>
+                <Btn className="w-full mt-4" disabled={selectedLines.length === 0 || !reason.trim()} onClick={submit}>
+                  Record sales return{selectedLines.length > 0 ? ` — refund ${money(totalRefund)}` : ''}
+                </Btn>
+                {selectedLines.length === 0 && <p className="text-xs text-slate-400 mt-1.5">Enter a return quantity on at least one medicine card.</p>}
+              </Card>
+            </>
+          )}
+        </div>
+      )}
+
+      {tab === 'history' && (
+        history.length === 0 ? <Card><Empty text="No sales returns yet." /></Card> : (
+          <div className="grid sm:grid-cols-2 xl:grid-cols-3 gap-3">
+            {history.map(r => { const orig = db.sales.find(s => s.id === r.saleId); return (
+              <div key={r.id} className="border border-slate-200 dark:border-slate-700 rounded-xl p-3 bg-white dark:bg-slate-800 flex flex-col">
+                <div className="flex items-start justify-between gap-2">
+                  <div className="font-bold">{r.returnNo}</div>
+                  <Btn kind="soft" onClick={() => setDetailRet(r.id)}>View Details</Btn>
+                </div>
+                <div className="mt-1.5 flex-1">
+                  <DetailRow label="Original invoice">{orig?.invoiceNo ?? '—'}</DetailRow>
+                  <DetailRow label="Customer">{db.customers.find(c => c.id === orig?.customerId)?.name ?? '—'}</DetailRow>
+                  <DetailRow label="Return date">{fmtDateTime(r.dateTime)}</DetailRow>
+                  <DetailRow label="Refund amount"><span className="font-bold">{money(r.refundPaisa)}</span></DetailRow>
+                  <DetailRow label="Refund method">{r.method}</DetailRow>
+                  <DetailRow label="Recorded by">{db.users.find(u => u.id === r.userId)?.fullName ?? '—'}</DetailRow>
+                </div>
+                <div className="mt-2 pt-2 border-t border-dashed border-slate-200 dark:border-slate-600 text-sm">
+                  <span className="text-slate-400 text-xs uppercase tracking-wide font-semibold">Reason</span>
+                  <div className="break-words mt-0.5">{r.reason}</div>
+                </div>
+              </div>); })}
+          </div>
+        )
+      )}
+
+      {detailRet !== null && (() => {
+        const r = db.salesReturns.find(x => x.id === detailRet)!;
+        const orig = db.sales.find(s => s.id === r.saleId);
+        const rItems = db.salesReturnItems.filter(x => x.returnId === r.id);
+        return (
+          <Modal title={`Sales return ${r.returnNo}`} onClose={() => setDetailRet(null)} wide>
+            <div className="grid sm:grid-cols-2 gap-x-6 mb-3">
+              <DetailRow label="Return ID">{r.returnNo}</DetailRow>
+              <DetailRow label="Original invoice">{orig?.invoiceNo ?? '—'}</DetailRow>
+              <DetailRow label="Customer">{db.customers.find(c => c.id === orig?.customerId)?.name ?? '—'}</DetailRow>
+              <DetailRow label="Date & time">{fmtDateTime(r.dateTime)}</DetailRow>
+              <DetailRow label="Refund method">{r.method}</DetailRow>
+              <DetailRow label="Recorded by">{db.users.find(u => u.id === r.userId)?.fullName ?? '—'}</DetailRow>
+            </div>
+            <div className="space-y-2">
+              {rItems.map(ri => { const si = db.saleItems.find(x => x.id === ri.saleItemId); return (
+                <div key={ri.id} className="border border-slate-200 dark:border-slate-700 rounded-xl p-3">
+                  <div className="font-semibold break-words">{si?.medicineName ?? engine.medicine(ri.medicineId).name}</div>
+                  <div className="grid sm:grid-cols-2 gap-x-6 mt-1">
+                    <DetailRow label="Batch (as sold)">{si ? si.allocations.map(a => `${a.batchNo}×${a.qty} (exp ${fmtDate(a.expiryDate)})`).join(', ') : '—'}</DetailRow>
+                    <DetailRow label="Quantity returned">{ri.qty}</DetailRow>
+                    <DetailRow label="Medicine condition">{DISPOSITION_LABEL[ri.disposition]}</DetailRow>
+                    <DetailRow label="Stock disposition">{DISPOSITION_RESULT[ri.disposition]}</DetailRow>
+                    <DetailRow label="Refund for this medicine">{money(ri.amountPaisa)}</DetailRow>
                   </div>
                 </div>); })}
-              <div className="grid grid-cols-2 gap-2">
-                <Field label="Refund method"><select className={inputCls} value={method} onChange={e => setMethod(e.target.value as any)}>
-                  <option value="cash">Cash refund</option><option value="credit">Customer credit (reduce udhaar)</option><option value="card">Card reversal</option><option value="bank">Bank transfer</option></select></Field>
-                <Field label="Reason *"><input className={inputCls} value={reason} onChange={e => setReason(e.target.value)} placeholder="e.g. Wrong medicine dispensed" /></Field>
-              </div>
-              <Btn className="w-full" onClick={submit}>Record sales return</Btn>
             </div>
-          )}
-        </Card>
-        <Card title="Return history">
-          {db.salesReturns.length === 0 ? <Empty text="No sales returns yet." /> : (
-            <Table head={['Return', 'Invoice', 'When', 'Refund', 'Method', 'Reason']}>
-              {[...db.salesReturns].reverse().map(r => <tr key={r.id}><td>{r.returnNo}</td><td>{db.sales.find(s => s.id === r.saleId)?.invoiceNo}</td><td>{fmtDateTime(r.dateTime)}</td><td className="font-semibold">{money(r.refundPaisa)}</td><td>{r.method}</td><td>{r.reason}</td></tr>)}
-            </Table>
-          )}
-        </Card>
-      </div>
+            <div className="flex justify-between items-center mt-4 text-sm">
+              <span className="text-slate-400">Reason: <span className="text-slate-700 dark:text-slate-200 break-words">{r.reason}</span></span>
+              <span className="font-bold shrink-0 ml-3">Total refund: {money(r.refundPaisa)}</span>
+            </div>
+            <div className="flex justify-end mt-4"><Btn onClick={() => setDetailRet(null)}>Close</Btn></div>
+          </Modal>);
+      })()}
     </Page>
   );
 }
@@ -148,57 +282,45 @@ export function PurchaseReturns({ user }: { user: SessionUser }) {
   };
   return (
     <Page title="Purchase Returns" sub="Send eligible stock back to the supplier. The original purchase is preserved; the supplier balance is reduced by batch cost.">
-      <div className="grid lg:grid-cols-2 gap-4 items-start">
-        <Card title="New purchase return">
+      <div className="grid lg:grid-cols-5 gap-4 items-start">
+        <Card title="New purchase return" className="lg:col-span-3">
           <Field label="Supplier"><select className={inputCls} value={supplierId} onChange={e => { setSupplierId(e.target.value); setQtys({}); }}>
             {db.suppliers.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}</select></Field>
           <div className="mt-3">
             {batches.length === 0 ? <Empty text="No batches with stock for this supplier." /> : (
               <>
-              <p className="text-xs text-slate-400 mb-2">Enter the quantity to return for each batch (0 = not returned). On narrow windows the table scrolls sideways inside this box.</p>
-              {/* Simple, reliable table: standard layout, fixed column widths via
-                  colgroup, horizontal scrolling contained in this box. No sticky
-                  columns/shadows — those rendered unreliably in WebView2. */}
-              <div className="overflow-auto max-h-[520px] border border-slate-200 dark:border-slate-700 rounded-xl">
-                <table className="w-full min-w-[620px] text-sm border-collapse">
-                  <colgroup>
-                    <col style={{ width: '30%' }} /><col style={{ width: '13%' }} /><col style={{ width: '11%' }} />
-                    <col style={{ width: '13%' }} /><col style={{ width: '18%' }} /><col style={{ width: '15%' }} />
-                  </colgroup>
-                  <thead>
-                    <tr className="text-left text-[11px] uppercase tracking-wide text-slate-500 dark:text-slate-400 bg-slate-50 dark:bg-slate-700/40">
-                      <th className="py-2 px-3 font-semibold border-b border-slate-200 dark:border-slate-700">Medicine · batch</th>
-                      <th className="py-2 px-3 font-semibold border-b border-slate-200 dark:border-slate-700">Expiry</th>
-                      <th className="py-2 px-3 font-semibold border-b border-slate-200 dark:border-slate-700">Eligible qty</th>
-                      <th className="py-2 px-3 font-semibold border-b border-slate-200 dark:border-slate-700">Unit cost</th>
-                      <th className="py-2 px-3 font-semibold border-b border-slate-200 dark:border-slate-700">Return qty</th>
-                      <th className="py-2 px-3 font-semibold border-b border-slate-200 dark:border-slate-700">Return value</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {batches.map(b => { const err = qtyError(b.id, b.qtyRemaining); const q = qtys[b.id] ?? 0; return (
-                      <tr key={b.id} className="hover:bg-slate-50 dark:hover:bg-slate-700/30">
-                        <td className="py-2 px-3 align-top border-b border-slate-100 dark:border-slate-700">
-                          <div className="font-semibold leading-snug break-words">{medLabel(engine.medicine(b.medicineId))}</div>
-                          <div className="text-xs text-slate-400 break-words">Batch {b.batchNo}{engine.isExpired(b) && <> · <Badge color="red">expired</Badge></>}</div>
-                        </td>
-                        <td className="py-2 px-3 align-top border-b border-slate-100 dark:border-slate-700 whitespace-nowrap">{fmtDate(b.expiryDate)}</td>
-                        <td className="py-2 px-3 align-top border-b border-slate-100 dark:border-slate-700">{b.qtyRemaining}</td>
-                        <td className="py-2 px-3 align-top border-b border-slate-100 dark:border-slate-700 whitespace-nowrap">{money(b.costPaisa)}</td>
-                        <td className="py-2 px-3 align-top border-b border-slate-100 dark:border-slate-700">
-                          <input type="number" min={0} max={b.qtyRemaining} step={1} inputMode="numeric" aria-label={`Return quantity for ${medLabel(engine.medicine(b.medicineId))} batch ${b.batchNo}`}
-                            className={inputCls + ' !w-[104px] text-center' + (err ? ' !border-red-500' : '')}
-                            value={qtys[b.id] ?? 0}
-                            onFocus={e => e.target.select()}
-                            onWheel={e => (e.target as HTMLInputElement).blur()}
-                            onChange={e => { const v = e.target.value === '' ? 0 : parseInt(e.target.value, 10); setQtys(prev => ({ ...prev, [b.id]: Number.isNaN(v) ? -1 : v })); }}
-                            onBlur={() => setQtys(prev => { const v = prev[b.id] ?? 0; return { ...prev, [b.id]: Math.max(0, Math.min(b.qtyRemaining, Number.isFinite(v) ? v : 0)) }; })} />
-                          {err && <div className="text-[11px] text-red-500 mt-1 leading-tight">{err}</div>}
-                        </td>
-                        <td className="py-2 px-3 align-top border-b border-slate-100 dark:border-slate-700 whitespace-nowrap font-semibold">{q > 0 ? money(q * b.costPaisa) : '—'}</td>
-                      </tr>); })}
-                  </tbody>
-                </table>
+              <p className="text-xs text-slate-400 mb-2">Enter the quantity to return on each batch card (0 = not returned). Selected batches are highlighted.</p>
+              <div className="grid sm:grid-cols-2 gap-3 max-h-[560px] overflow-y-auto pr-0.5">
+                {batches.map(b => { const err = qtyError(b.id, b.qtyRemaining); const q = qtys[b.id] ?? 0; const sel = q > 0; const med = engine.medicine(b.medicineId); return (
+                  <div key={b.id} className={`border rounded-xl p-3 transition ${sel ? 'border-teal-500 ring-1 ring-teal-500 bg-teal-50/70 dark:bg-teal-900/20' : 'border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800'}`}>
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="font-semibold leading-snug break-words">{medLabel(med)}</div>
+                      {sel && <Badge color="green">selected</Badge>}
+                    </div>
+                    <div className="text-xs text-slate-400 break-words mt-0.5">Batch {b.batchNo}</div>
+                    <div className="mt-2 space-y-0.5">
+                      <DetailRow label="Expiry">{engine.isExpired(b) ? <Badge color="red">Expired {fmtDate(b.expiryDate)}</Badge> : <span>{fmtDate(b.expiryDate)} <span className="text-slate-400">· active</span></span>}</DetailRow>
+                      <DetailRow label="Eligible qty">{b.qtyRemaining} {med.unit}</DetailRow>
+                      <DetailRow label="Unit cost">{money(b.costPaisa)}</DetailRow>
+                    </div>
+                    <div className="flex items-end justify-between gap-2 mt-2 pt-2 border-t border-dashed border-slate-200 dark:border-slate-600">
+                      <div>
+                        <label className="block text-[11px] uppercase tracking-wide text-slate-400 font-semibold mb-1">Return qty</label>
+                        <input type="number" min={0} max={b.qtyRemaining} step={1} inputMode="numeric" aria-label={`Return quantity for ${medLabel(med)} batch ${b.batchNo}`}
+                          className={inputCls + ' !w-[104px] text-center' + (err ? ' !border-red-500' : '')}
+                          value={qtys[b.id] ?? 0}
+                          onFocus={e => e.target.select()}
+                          onWheel={e => (e.target as HTMLInputElement).blur()}
+                          onChange={e => { const v = e.target.value === '' ? 0 : parseInt(e.target.value, 10); setQtys(prev => ({ ...prev, [b.id]: Number.isNaN(v) ? -1 : v })); }}
+                          onBlur={() => setQtys(prev => { const v = prev[b.id] ?? 0; return { ...prev, [b.id]: Math.max(0, Math.min(b.qtyRemaining, Number.isFinite(v) ? v : 0)) }; })} />
+                      </div>
+                      <div className="text-right">
+                        <div className="text-[11px] uppercase tracking-wide text-slate-400 font-semibold">Return value</div>
+                        <div className="font-bold">{q > 0 ? money(q * b.costPaisa) : '—'}</div>
+                      </div>
+                    </div>
+                    {err && <div className="text-[11px] text-red-500 mt-1.5 leading-tight">{err}</div>}
+                  </div>); })}
               </div>
               <div className="flex flex-wrap justify-between gap-2 mt-2 text-sm">
                 <span className="text-slate-500">{selected.length} batch(es) selected</span>
@@ -211,7 +333,7 @@ export function PurchaseReturns({ user }: { user: SessionUser }) {
           {can(user.role, 'purchase.return') && <Btn className="w-full mt-4" disabled={hasQtyError || selected.length === 0} onClick={submit}>Record purchase return{selected.length > 0 ? ` (${money(returnTotal)})` : ''}</Btn>}
           {hasQtyError && <p className="text-xs text-red-500 mt-1.5">Fix the highlighted quantities before recording the return.</p>}
         </Card>
-        <Card title="Return history">
+        <Card title="Return history" className="lg:col-span-2">
           {db.purchaseReturns.length === 0 ? <Empty text="No purchase returns yet." /> : (
             <Table head={['Return', 'Supplier', 'When', 'Value', 'Reason', '']}>
               {[...db.purchaseReturns].reverse().map(r => <tr key={r.id}><td className="font-semibold">{r.returnNo}</td><td>{db.suppliers.find(s => s.id === r.supplierId)?.name}</td><td>{fmtDateTime(r.dateTime)}</td><td className="font-semibold">{money(r.totalPaisa)}</td><td>{r.reason}</td>
